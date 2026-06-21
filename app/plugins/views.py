@@ -16,7 +16,7 @@ def try_resolve_url(request, url):
     o = urlparse(request.get_full_path())
     res = url.resolve(o.path)
     if res:
-        return res
+        return (res.func, res.args, res.kwargs)
     else:
         return (None, None, None)
 

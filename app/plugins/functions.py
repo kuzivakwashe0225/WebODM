@@ -103,7 +103,8 @@ def build_plugins():
         # Check if we need to generate a webpack.config.js
         if len(plugin.build_jsx_components()) > 0 and plugin.path_exists('public'):
             build_paths = map(lambda p: os.path.join(plugin.get_path('public'), p), plugin.build_jsx_components())
-            paths_ok = not (False in map(lambda p: os.path.exists, build_paths))
+            build_paths = list(build_paths)
+            paths_ok = all(map(os.path.exists, build_paths))
 
             if paths_ok:
                 wpc_path = os.path.join(settings.BASE_DIR, 'app', 'plugins', 'templates', 'webpack.config.js.tmpl')
@@ -126,10 +127,35 @@ def build_plugins():
 
         # Check for webpack.config.js (if we need to build it)
         if plugin.path_exists("public/webpack.config.js"):
+            def plugin_needs_rebuild():
+                build_dir = plugin.get_path("public/build")
+                if not os.path.isdir(build_dir):
+                    return True
+
+                sources = []
+                for root, _, files in os.walk(plugin.get_path("public")):
+                    if os.path.abspath(root).startswith(os.path.abspath(build_dir)):
+                        continue
+                    for filename in files:
+                        if os.path.splitext(filename)[1] in ('.js', '.jsx', '.scss', '.css'):
+                            sources.append(os.path.join(root, filename))
+
+                outputs = []
+                for root, _, files in os.walk(build_dir):
+                    for filename in files:
+                        outputs.append(os.path.join(root, filename))
+
+                if not outputs:
+                    return True
+
+                latest_source = max(map(os.path.getmtime, sources + [plugin.get_path("public/webpack.config.js")]))
+                earliest_output = min(map(os.path.getmtime, outputs))
+                return latest_source > earliest_output
+
             if settings.DEV and webpack_watch_process_count() <= 2 and settings.DEV_WATCH_PLUGINS:
                 logger.info("Running webpack with watcher for {}".format(plugin.get_name()))
                 subprocess.Popen(['webpack-cli', '--watch'], cwd=plugin.get_path("public"))
-            elif not plugin.path_exists("public/build"):
+            elif plugin_needs_rebuild():
                 logger.info("Running webpack for {}".format(plugin.get_name()))
 
                 try:

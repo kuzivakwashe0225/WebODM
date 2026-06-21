@@ -1,5 +1,6 @@
 import os
 import mimetypes
+import logging
 
 from worker.tasks import TestSafeAsyncResult
 from rest_framework.views import APIView
@@ -10,39 +11,55 @@ from django.http import FileResponse
 from django.http import HttpResponse
 from wsgiref.util import FileWrapper
 
+logger = logging.getLogger('app.logger')
+
 class CheckTask(APIView):
     permission_classes = (permissions.AllowAny,)
 
     def get(self, request, celery_task_id=None, **kwargs):
-        res = TestSafeAsyncResult(celery_task_id)
+        try:
+            res = TestSafeAsyncResult(celery_task_id)
 
-        if not res.ready():
-            out = {'ready': False}
-            
-            # Copy progress meta
-            if res.state == "PROGRESS" and res.info is not None:
-                for k in res.info:
-                    out[k] = res.info[k]
-            
-            return Response(out, status=status.HTTP_200_OK)
-        else:
-            result = res.get()
+            if not res.ready():
+                out = {'ready': False}
+                
+                # Copy progress meta
+                if res.state == "PROGRESS" and res.info is not None:
+                    for k in res.info:
+                        out[k] = res.info[k]
+                
+                return Response(out, status=status.HTTP_200_OK)
+            else:
+                try:
+                    result = res.get()
+                except Exception as e:
+                    logger.error(f"Error retrieving task result for {celery_task_id}: {str(e)}")
+                    return Response({'ready': True, 'error': f"Failed to retrieve task result: {str(e)}"}, status=status.HTTP_200_OK)
 
-            if result.get('error', None) is not None:
-                msg = self.on_error(result)
-                return Response({'ready': True, 'error': msg})
+                if result is None:
+                    return Response({'ready': True, 'error': 'Task returned no result'}, status=status.HTTP_200_OK)
 
-            if self.error_check(result) is not None:
-                msg = self.on_error(result)
-                return Response({'ready': True, 'error': msg})
+                if not isinstance(result, dict):
+                    return Response({'ready': True, 'error': f'Invalid result format: {type(result)}'}, status=status.HTTP_200_OK)
 
-            if isinstance(result.get('file'), str) and not os.path.isfile(result.get('file')):
-                return Response({'ready': True, 'error': "Cannot generate file"})
+                if result.get('error', None) is not None:
+                    msg = self.on_error(result)
+                    return Response({'ready': True, 'error': msg}, status=status.HTTP_200_OK)
 
-            return Response({'ready': True})
+                if self.error_check(result) is not None:
+                    msg = self.on_error(result)
+                    return Response({'ready': True, 'error': msg}, status=status.HTTP_200_OK)
+
+                if isinstance(result.get('file'), str) and not os.path.isfile(result.get('file')):
+                    return Response({'ready': True, 'error': "Cannot generate file"}, status=status.HTTP_200_OK)
+
+                return Response({'ready': True}, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.exception(f"Unexpected error in CheckTask.get for {celery_task_id}")
+            return Response({'ready': False, 'error': f'Internal server error: {str(e)}'}, status=status.HTTP_200_OK)
 
     def on_error(self, result):
-        return result['error']
+        return result.get('error', 'Unknown error')
 
     def error_check(self, result):
         pass

@@ -9,6 +9,8 @@ import SystemJS from 'SystemJS';
 
 if (!window.PluginsAPI){
   const events = new EventEmitter();
+  console.log('EventEmitter:', EventEmitter);
+  console.log('events:', events);
   const factory = new ApiFactory(events);
 
   SystemJS.config({

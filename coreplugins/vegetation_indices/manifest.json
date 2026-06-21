@@ -1,0 +1,13 @@
+{
+	"name": "Vegetation Indices",
+	"webodmMinVersion": "2.6.0",
+	"description": "Compute and visualize vegetation indices from orthophotos",
+	"version": "1.0.0",
+	"author": "WebODM",
+	"email": "info@opendronemap.org",
+	"repository": "https://github.com/OpenDroneMap/WebODM",
+	"tags": ["vegetation", "indices", "analysis"],
+	"homepage": "https://github.com/OpenDroneMap/WebODM",
+	"experimental": true,
+	"deprecated": false
+}

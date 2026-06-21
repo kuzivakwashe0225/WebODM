@@ -22,7 +22,7 @@ module.exports = {
 
   output: {
     path: path.join(__dirname, './app/static/app/bundles/'),
-    filename: "[name]-[hash].js",
+    filename: "[name]-[hash]-v2.js",
     publicPath: '/static/app/bundles/'
   },
 

@@ -8,7 +8,7 @@ import Workers from 'webodm/classes/Workers';
 import Utils from 'webodm/classes/Utils';
 import { _ } from 'webodm/classes/gettext';
 
-export default class ObjDetectPanel extends React.Component {
+export default class WeedDetect extends React.Component {
   static defaultProps = {
   };
   static propTypes = {
@@ -24,12 +24,12 @@ export default class ObjDetectPanel extends React.Component {
     this.state = {
         error: "",
         permanentError: "",
-        model: Storage.getItem("last_objdetect_model") || "cars",
+        model: Storage.getItem("last_weeddetect_model") || "weeds",
         loading: true,
         task: props.tasks[0] || null,
         detecting: false,
         progress: null,
-        objLayer: null,
+        weedLayer: null,
     };
   }
 
@@ -44,7 +44,7 @@ export default class ObjDetectPanel extends React.Component {
           .done(res => {
               const { available_assets } = res;
               if (available_assets.indexOf("orthophoto.tif") === -1){
-                this.setState({permanentError: _("No orthophoto is available. To use object detection you need an orthophoto.")});
+                this.setState({permanentError: _("No orthophoto is available. To use weed detection you need an orthophoto.")});
               }
           })
           .fail(() => {
@@ -85,7 +85,8 @@ export default class ObjDetectPanel extends React.Component {
 
     try{
       this.handleRemoveObjLayer();
-      const objLayer = L.geoJSON(geojson, {
+
+      this.setState({objLayer: L.geoJSON(geojson, {
         onEachFeature: (feature, layer) => {
             if (feature.properties && feature.properties['class'] !== undefined) {
                 layer.bindPopup(`<div style="margin-right: 32px;">
@@ -99,10 +100,9 @@ export default class ObjDetectPanel extends React.Component {
             // TODO: different colors for different elevations?
             return {color: "red"};
         }
-      });
-      objLayer.addTo(map);
-      objLayer.label = this.state.model;
-      this.setState({objLayer});
+      })});
+      this.state.objLayer.addTo(map);
+      this.state.objLayer.label = this.state.model;
 
       cb();
     }catch(e){
@@ -110,12 +110,12 @@ export default class ObjDetectPanel extends React.Component {
     }
   }
 
-  handleRemoveObjLayer = () => {
+  handleRemoveWeedLayer = () => {
     const { map } = this.props;
 
-    if (this.state.objLayer){
-      map.removeLayer(this.state.objLayer);
-      this.setState({objLayer: null});
+    if (this.state.weedLayer){
+      map.removeLayer(this.state.weedLayer);
+      this.setState({weedLayer: null});
     }
   }
 
@@ -125,14 +125,14 @@ export default class ObjDetectPanel extends React.Component {
   }
 
   handleDetect = () => {
-    this.handleRemoveObjLayer();
+    this.handleRemoveWeedLayer();
     this.setState({detecting: true, error: "", progress: null});
     const taskId = this.state.task.id;
     this.saveInputValues();
 
     this.detectReq = $.ajax({
         type: 'POST',
-        url: `/api/plugins/objdetect/task/${taskId}/detect`,
+        url: `/api/plugins/weed-detect/task/${taskId}/weeddetect`,
         data: this.getFormValues()
     }).done(result => {
         if (result.celery_task_id){
@@ -140,12 +140,10 @@ export default class ObjDetectPanel extends React.Component {
             if (error) this.setState({detecting: false, error});
             else{
               Workers.getOutput(result.celery_task_id, (error, geojson) => {
-                if (typeof geojson === "string"){
-                  try{
-                    geojson = JSON.parse(geojson);
-                  }catch(e){
-                    error = "Invalid GeoJSON";
-                  }
+                try{
+                  geojson = JSON.parse(geojson);
+                }catch(e){
+                  error = "Invalid GeoJSON";
                 }
 
                 if (error) this.setState({detecting: false, error});
@@ -177,12 +175,7 @@ export default class ObjDetectPanel extends React.Component {
   render(){
     const { loading, permanentError, objLayer, detecting, model, progress } = this.state;
     const models = [
-      {label: _('Cars'), value: 'cars'}, 
-      // {label: _('Trees'), value: 'trees'},
-      {label: _('Athletic Facilities'), value: 'athletic'},
-      {label: _('Boats'), value: 'boats'},
-      {label: _('Planes'), value: 'planes'},
-      {label: _('Crops'), value: 'crops'}
+      {label: _('Weeds'), value: 'weeds'}
     ]
     
     let content = "";
@@ -195,7 +188,7 @@ export default class ObjDetectPanel extends React.Component {
         <ErrorMessage bind={[this, "error"]} />
         <div className="row model-selector">
             <select className="form-control" value={model} onChange={this.handleSelectModel}>
-              {models.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+              {models.map(m => <option value={m.value}>{m.label}</option>)}
             </select>
             <button onClick={this.handleDetect}
                     disabled={detecting} type="button" className="btn btn-sm btn-primary btn-detect">
@@ -219,9 +212,9 @@ export default class ObjDetectPanel extends React.Component {
       </div>);
     }
 
-    return (<div className="objdetect-panel">
+    return (<div className="weeddetect-panel">
       <span className="close-button" onClick={this.props.onClose}/>
-      <div className="title">{_("Object Detection")}</div>
+      <div className="title">{_("Weed Detection")}</div>
       <hr/>
       {content}
     </div>);

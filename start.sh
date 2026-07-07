@@ -37,23 +37,33 @@ if [ $? -ne 0 ]; then
 fi
 
 if [ "$1" = "--setup-devenv" ] || [ "$2" = "--setup-devenv" ]; then
-    echo Setup git modules...
-    
-    git submodule update --init
-    
-    echo Setup npm dependencies...
-    npm install
+    # The heavy one-time setup (submodules, npm, pip, and the very slow all-locale
+    # `translate build`) is gated behind a marker on the now-persistent (named) venv
+    # volume, so container recreation doesn't redo it on every single boot.
+    # Force a redo with:  rm /webodm/venv/.devenv_done   (or set WO_FORCE_DEVENV=YES)
+    if [ ! -f /webodm/venv/.devenv_done ] || [ "$WO_FORCE_DEVENV" = "YES" ]; then
+        echo Setup git modules...
 
-    cd nodeodm/external/NodeODM
-    npm install
+        git submodule update --init
 
-    cd /webodm
+        echo Setup npm dependencies...
+        npm install
 
-    echo Setup pip requirements...
-    pip install -r requirements.txt
+        cd nodeodm/external/NodeODM
+        npm install
 
-    echo Build translations...
-    python manage.py translate build --safe
+        cd /webodm
+
+        echo Setup pip requirements...
+        pip install -r requirements.txt
+
+        echo Build translations...
+        python manage.py translate build --safe
+
+        touch /webodm/venv/.devenv_done
+    else
+        echo "Dev env already set up (found /webodm/venv/.devenv_done) — skipping submodules/npm/pip/translations. Set WO_FORCE_DEVENV=YES to redo."
+    fi
 
     echo Setup webpack watch...
     webpack --watch &

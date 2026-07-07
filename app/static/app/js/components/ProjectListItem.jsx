@@ -673,8 +673,8 @@ class ProjectListItem extends React.Component {
     const numTasks = data.tasks.length;
     const canEdit = this.hasPermission("change");
     const userTags = Tags.userTags(data.tags);
-    let deleteWarning = _("All tasks, images and models associated with this project will be permanently deleted. Are you sure you want to continue?");
-    if (!data.owned) deleteWarning = _("This project was shared with you. It will not be deleted, but simply hidden from your dashboard. Continue?")
+    let deleteWarning = _("All tasks, images and models associated with this farm will be permanently deleted. Are you sure you want to continue?");
+    if (!data.owned) deleteWarning = _("This farm was shared with you. It will not be deleted, but simply hidden from your dashboard. Continue?")
 
     return (
       <li className={"project-list-item list-group-item " + (refreshing ? "refreshing" : "")}
@@ -685,7 +685,7 @@ class ProjectListItem extends React.Component {
         {canEdit ? 
             <EditProjectDialog 
             ref={(domNode) => { this.editProjectDialog = domNode; }}
-            title={_("Edit Project")}
+            title={_("Edit Farm")}
             saveLabel={_("Save Changes")}
             savingLabel={_("Saving changes...")}
             saveIcon="far fa-edit"

@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(MSYS_NO_PATHCONV=1 docker inspect webapp --format '{{index .Config.Labels \"com.docker.compose.project\"}}')",
+      "Bash(MSYS_NO_PATHCONV=1 WO_DEV=YES WO_DEBUG=YES docker compose -p webodm -f docker-compose.yml -f docker-compose.nodeodm.yml -f docker-compose.dev.yml up -d)",
+      "Bash(MSYS_NO_PATHCONV=1 docker inspect webapp --format '{{range .Mounts}}{{.Destination}} {{end}}')",
+      "Bash(MSYS_NO_PATHCONV=1 docker compose -p webodm exec -T webapp bash -c \"ls /webodm/app/branding.py && ls /webodm/app/management/commands/apply_branding.py\")",
+      "Bash(MSYS_NO_PATHCONV=1 docker logs --tail 60 webapp)",
+      "Bash(python -)",
+      "Bash(MSYS_NO_PATHCONV=1 docker restart webapp worker)",
+      "Bash(MSYS_NO_PATHCONV=1 docker logs --tail 30 webapp)",
+      "Bash(MSYS_NO_PATHCONV=1 docker compose -p webodm exec -T webapp python manage.py apply_branding)",
+      "Bash(curl -s -m 10 http://localhost:8000/login/)",
+      "Bash(curl -s -m 10 http://localhost:8000/)",
+      "Bash(git mv *)",
+      "Bash(MSYS_NO_PATHCONV=1 docker compose -p webodm exec -T webapp python manage.py makemigrations agri)",
+      "Bash(MSYS_NO_PATHCONV=1 docker logs --tail 6 webapp)",
+      "Bash(MSYS_NO_PATHCONV=1 docker compose -p webodm exec -T webapp python manage.py migrate agri)",
+      "Bash(MSYS_NO_PATHCONV=1 docker compose -p webodm exec -T db psql -U postgres -d webodm_dev -c \"\\\\d agri_boundary\")",
+      "Bash(curl -s -o /dev/null -w \"GET /api/agri/boundaries/ -> %{http_code}\\\\n\" http://localhost:8000/api/agri/boundaries/)",
+      "Bash(MSYS_NO_PATHCONV=1 docker compose -p webodm exec -T webapp python manage.py test agri --verbosity 2)"
+    ]
+  }
+}

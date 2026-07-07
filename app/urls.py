@@ -36,6 +36,7 @@ urlpatterns = [
     url(r'^processingnode/([\d]+)/$', app_views.processing_node, name='processing_node'),
 
     url(r'^api/', include("app.api.urls")),
+    url(r'^api/agri/', include("agri.api.urls")),
 
     url(r'^plugins/(?P<plugin_name>[^/.]+)/(.*)$', app_view_handler),
 

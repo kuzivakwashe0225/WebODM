@@ -76,6 +76,10 @@ def boot():
         if created:
             logger.info("Created default theme")
 
+            # Brand a fresh install with Precise Agric System colors
+            from app.branding import apply_theme_colors
+            apply_theme_colors(default_theme)
+
             if settings.DEFAULT_THEME_CSS:
                 default_theme.css = settings.DEFAULT_THEME_CSS
                 default_theme.save()
@@ -88,6 +92,10 @@ def boot():
 
             logger.info("Created settings")
         
+        # Precise Agric: seed the four role groups (SuperAdmin/Admin/Technician/Agronomist)
+        from agri.roles import setup_roles
+        setup_roles()
+
         init_plugins()
 
         if not settings.TESTING:

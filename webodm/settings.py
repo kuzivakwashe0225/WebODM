@@ -1,4 +1,4 @@
-import os, sys, json
+import os, sys, json  # noqa: reload-trigger-10
 
 import datetime
 
@@ -50,7 +50,7 @@ INTERNAL_IPS = ['127.0.0.1']
 ALLOWED_HOSTS = ['*']
 
 # Branding
-APP_NAME = "WebODM"
+APP_NAME = "Precise Agric System"
 APP_DEFAULT_LOGO = os.path.join('app', 'static', 'app', 'img', 'logo512.png')
 
 # In single user mode, a default admin account is created and automatically
@@ -104,6 +104,7 @@ INSTALLED_APPS = [
     'codemirror2',
     'app',
     'nodeodm',
+    'agri',
 ]
 
 MIDDLEWARE = [
@@ -328,7 +329,7 @@ CELERY_RESULT_BACKEND = os.environ.get('WO_BROKER', 'redis://localhost')
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_ACCEPT_CONTENT = ['json']
-CELERY_INCLUDE=['worker.tasks', 'app.plugins.worker']
+CELERY_INCLUDE=['worker.tasks', 'app.plugins.worker', 'agri.tasks']
 CELERY_WORKER_REDIRECT_STDOUTS = False
 CELERY_WORKER_HIJACK_ROOT_LOGGER = False
 
@@ -375,6 +376,27 @@ QUOTA_EXCEEDED_GRACE_PERIOD = 8
 
 # URL to call when an account is about to have some of its tasks removed
 QUOTA_EXCEEDED_NOTIFY_URL = None
+
+# Precise Agric: URL to POST approved analysis runs to (AgriTrack mobile API).
+# None disables the push (Stage 4 stub-friendly default).
+AGRITRACK_PUSH_URL = os.environ.get('WO_AGRITRACK_PUSH_URL') or None
+
+# AgriTrack integration (real mobile app, per the integration contract):
+# - shared secret AgriTrack must send as X-Api-Key when calling our inbound
+#   POST /api/v1/mobile/sync. None means the endpoint rejects everything.
+AGRITRACK_INBOUND_API_KEY = os.environ.get('WO_AGRITRACK_INBOUND_API_KEY') or None
+# - WebODM username that owns Projects auto-created from AgriTrack farm syncs
+#   (farmers have no WebODM account). Falls back to the first superuser if unset.
+AGRITRACK_SYNC_OWNER_USERNAME = os.environ.get('WO_AGRITRACK_SYNC_OWNER_USERNAME') or None
+# - AgriTrack's live results-push endpoint (their actual current path, e.g.
+#   https://<their-host>/orthophoto/analysis/push) and the X-Api-Key they issue
+#   us for it. Both None disables the push (see agri/agritrack/results.py).
+AGRITRACK_RESULTS_PUSH_URL = os.environ.get('WO_AGRITRACK_RESULTS_PUSH_URL') or None
+AGRITRACK_OUTBOUND_API_KEY = os.environ.get('WO_AGRITRACK_OUTBOUND_API_KEY') or None
+# - Public base URL of THIS server, used to build asset links (heatmap/index/
+#   weed maps) sent to AgriTrack. None means output URLs are omitted (their
+#   server has no way to reach us on localhost).
+AGRITRACK_PUBLIC_BASE_URL = os.environ.get('WO_AGRITRACK_PUBLIC_BASE_URL') or None
 
 # Maximum number of processing nodes to show in "Processing Nodes" menus/dropdowns
 UI_MAX_PROCESSING_NODES = None

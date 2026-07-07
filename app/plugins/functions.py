@@ -132,6 +132,13 @@ def build_plugins():
                 if not os.path.isdir(build_dir):
                     return True
 
+                # Dev escape hatch: when file mtimes are unreliable (e.g. Docker Desktop
+                # bind mounts on Windows), the mtime check below rebuilds every plugin on
+                # every boot. With WO_SKIP_PLUGIN_REBUILD=YES, trust an existing build and
+                # only rebuild plugins that have never been built.
+                if os.environ.get('WO_SKIP_PLUGIN_REBUILD', 'NO') == 'YES':
+                    return not any(os.scandir(build_dir))
+
                 sources = []
                 for root, _, files in os.walk(plugin.get_path("public")):
                     if os.path.abspath(root).startswith(os.path.abspath(build_dir)):

@@ -1,0 +1,215 @@
+{% extends "app/plugins/templates/base.html" %}
+{% load i18n %}
+{% block content %}
+<script src="/plugins/precise_agric/Chart.min.js"></script>
+
+<style>
+  .pa-season { max-width: 1080px; margin: 0 auto; padding-bottom: 40px; }
+  .pa-season .pa-hero { text-align: center; margin: 6px 0 18px; }
+  .pa-season .pa-hero h3 { font-weight: 700; }
+  .pa-season .pa-hero .pa-sub { color: #7a8a7f; }
+  .pa-season .pa-controls { display:flex; gap:12px; align-items:center; justify-content:center;
+      margin-bottom: 18px; flex-wrap: wrap; }
+  .pa-season .pa-summary { display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin-bottom: 20px; }
+  .pa-season .pa-stat { background: linear-gradient(135deg,#2e7d32,#1b5e20); color:#fff;
+      border-radius:10px; padding:12px 18px; min-width:150px; text-align:center; }
+  .pa-season .pa-stat .n { font-size: 22px; font-weight: 700; }
+  .pa-season .pa-stat .l { font-size: 12px; opacity:.9; }
+  .pa-season .pa-msg { text-align:center; color:#7a8a7f; padding:48px 0; font-size:15px; }
+  .pa-season .pa-cards { display:grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap:18px; }
+  .pa-season .pa-card { background:#fff; border:1px solid #e6ece7; border-radius:12px;
+      padding:16px 18px 10px; box-shadow: 0 1px 4px rgba(0,0,0,.05); }
+  .pa-season .pa-card .pa-card-head { display:flex; align-items:center; gap:8px; margin-bottom:2px; }
+  .pa-season .pa-card .pa-card-head .ttl { font-weight:700; font-size:16px; flex:1; }
+  .pa-season .pa-badge { font-size:11px; font-weight:700; padding:3px 9px; border-radius:12px; white-space:nowrap; }
+  .pa-season .pa-badge.good { background:#e6f4ea; color:#1b5e20; }
+  .pa-season .pa-badge.bad  { background:#fdecea; color:#b3261e; }
+  .pa-season .pa-badge.flat { background:#eef1f0; color:#5a6b60; }
+  .pa-season .pa-card .pa-desc { color:#6b7a70; font-size:12.5px; line-height:1.45; margin:4px 0 8px; }
+  .pa-season .pa-card .pa-latest { font-size:12px; color:#37474f; margin-bottom:6px; }
+  .pa-season .pa-card .pa-latest b { color:#1b5e20; }
+  .pa-season canvas { max-height: 240px; }
+  @media (prefers-color-scheme: dark){
+    .pa-season .pa-card { background:#20261f; border-color:#33402f; }
+    .pa-season .pa-card .ttl { color:#e8f0e6; }
+  }
+</style>
+
+<div class="pa-season">
+  <div class="pa-hero">
+    <h3><i class="fa fa-seedling" style="color:#2e7d32"></i> {% trans "Season Progress" %}</h3>
+    <div class="pa-sub">{% trans "How each field — and the whole farm — is trending across the growing season." %}</div>
+    <div class="pa-sub" style="font-size:12px;"><i class="fa fa-calendar-day"></i> {% trans "Trends are plotted by the date each orthophoto was captured (the flight date) — not when it was uploaded." %}</div>
+  </div>
+
+  <div class="pa-controls">
+    <label for="pa-farm" style="margin:0;"><i class="fa fa-leaf"></i> {% trans "Farm" %}:</label>
+    <select id="pa-farm" class="form-control" style="width:auto; min-width:260px;">
+      <option value="">{% trans "Loading farms…" %}</option>
+    </select>
+  </div>
+
+  <div id="pa-summary" class="pa-summary" style="display:none;"></div>
+  <div id="pa-empty" class="pa-msg" style="display:none;"></div>
+  <div id="pa-cards" class="pa-cards" style="display:none;"></div>
+</div>
+
+<script>
+(function(){
+  var PALETTE = ['#2e7d32','#1565c0','#ef6c00','#6a1b9a','#00838f','#c62828','#558b2f','#4527a0'];
+
+  // Each metric: what it is, in plain language a farmer can act on, and which
+  // direction is "good" (so trends are colored correctly).
+  var METRICS = [
+    {key:'health_mean', title:'Plant Health', icon:'🌿', unit:'', good:'up',
+     desc:'Overall crop greenness & vigour (vegetation index). A steady rise means the crop is developing well; a dip is an early stress signal — check water, nutrients or pests before it spreads.'},
+    {key:'vari_mean', title:'VARI · Visible Vigour', icon:'🍃', unit:'', good:'up',
+     desc:'Canopy vigour measured from ordinary colour imagery. Rising values point to healthier foliage and forecast a stronger canopy in the weeks ahead.'},
+    {key:'gli_mean', title:'Green Leaf Index', icon:'🌱', unit:'', good:'up',
+     desc:'A leaf-greenness / chlorophyll proxy. Climbing values suggest active growth and good nitrogen; a plateau or drop can precede leaf ageing or a deficiency.'},
+    {key:'canopy_pct', title:'Canopy Cover', icon:'🌾', unit:'%', good:'up',
+     desc:'How much ground the crop covers. Rising = the crop is filling in; the natural plateau near maturity helps you forecast canopy closure and harvest timing.'},
+    {key:'weed_count', title:'Weed Hotspots', icon:'⚠️', unit:'', good:'down',
+     desc:'Detected weed pressure. Falling means your weeding is working; a rise is an early warning to act before weeds start competing with the crop.'}
+  ];
+
+  var charts = {};
+  function color(i){ return PALETTE[i % PALETTE.length]; }
+  function hexA(hex, a){
+    var n = parseInt(hex.slice(1),16);
+    return 'rgba('+(n>>16&255)+','+(n>>8&255)+','+(n&255)+','+a+')';
+  }
+
+  function seriesVals(series, key){ return series.map(function(p){ return p[key]==null?null:p[key]; }); }
+
+  function trend(farmSeries, key, good){
+    var vals = farmSeries.map(function(p){return p[key];}).filter(function(v){return v!=null;});
+    if (vals.length < 2) return {cls:'flat', text:'— not enough data'};
+    var first = vals[0], last = vals[vals.length-1], delta = last - first;
+    var pct = first !== 0 ? (delta/Math.abs(first))*100 : null;
+    var flat = Math.abs(delta) < 1e-9 || (pct !== null && Math.abs(pct) < 3);
+    if (flat) return {cls:'flat', text:'→ Holding steady'};
+    var improving = good === 'up' ? delta > 0 : delta < 0;
+    var arrow = delta > 0 ? '▲' : '▼';
+    var mag = pct !== null ? (Math.abs(pct).toFixed(0)+'%') : Math.abs(delta).toFixed(2);
+    return {cls: improving?'good':'bad', text: arrow+' '+(improving?'Improving':'Needs attention')+' ('+mag+')'};
+  }
+
+  function buildDatasets(data, key){
+    var labels = (data.farm.series||[]).map(function(p){return p.date;});
+    var ds = [];
+    (data.fields||[]).forEach(function(f, i){
+      var byDate = {}; f.series.forEach(function(p){ byDate[p.date]=p; });
+      ds.push({
+        label: f.name,
+        data: labels.map(function(d){ return (byDate[d]&&byDate[d][key]!=null)?byDate[d][key]:null; }),
+        borderColor: color(i), backgroundColor: color(i),
+        pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, tension: 0.35, spanGaps: true, fill: false
+      });
+    });
+    ds.push({
+      label: 'Whole farm (avg)',
+      data: seriesVals(data.farm.series||[], key),
+      borderColor: '#0d3b16', backgroundColor: hexA('#2e7d32', 0.12),
+      pointRadius: 3, pointHoverRadius: 6, borderWidth: 3, tension: 0.35, spanGaps: true, fill: true
+    });
+    return {labels: labels, datasets: ds};
+  }
+
+  function latestFarm(series, key, unit){
+    for (var i=series.length-1;i>=0;i--){ if (series[i][key]!=null) return (Math.round(series[i][key]*1000)/1000)+unit; }
+    return '—';
+  }
+
+  function hasMetric(data, key){
+    return (data.fields||[]).some(function(f){ return f.series.some(function(p){ return p[key]!=null; }); });
+  }
+
+  function render(data){
+    var cards = document.getElementById('pa-cards');
+    var summary = document.getElementById('pa-summary');
+    var empty = document.getElementById('pa-empty');
+    Object.keys(charts).forEach(function(k){ charts[k].destroy(); }); charts={};
+    cards.innerHTML=''; summary.innerHTML='';
+
+    var anyData = (data.fields||[]).some(function(f){ return f.series.length>0; });
+    if (!anyData){
+      empty.style.display='block';
+      empty.innerHTML = '🌱 {% trans "No analyzed captures yet for this farm. Upload orthophotos across the season and approve their analysis to see trends here." %}';
+      cards.style.display='none'; summary.style.display='none';
+      return;
+    }
+    empty.style.display='none';
+
+    // Summary stats
+    var dates = (data.farm.series||[]).map(function(p){return p.date;});
+    var stats = [
+      {n: (data.fields||[]).length, l:'{% trans "Fields tracked" %}'},
+      {n: dates.length, l:'{% trans "Captures this season" %}'},
+      {n: dates.length? dates[0] : '—', l:'{% trans "First capture" %}'},
+      {n: dates.length? dates[dates.length-1] : '—', l:'{% trans "Latest capture" %}'}
+    ];
+    summary.style.display='flex';
+    stats.forEach(function(s){
+      summary.innerHTML += '<div class="pa-stat"><div class="n">'+s.n+'</div><div class="l">'+s.l+'</div></div>';
+    });
+
+    // Metric cards (only those with data)
+    cards.style.display='grid';
+    METRICS.forEach(function(m){
+      if (!hasMetric(data, m.key)) return;
+      var t = trend(data.farm.series||[], m.key, m.good);
+      var id = 'pa-chart-'+m.key;
+      var card = document.createElement('div');
+      card.className='pa-card';
+      card.innerHTML =
+        '<div class="pa-card-head"><span style="font-size:18px">'+m.icon+'</span>'+
+          '<span class="ttl">'+m.title+'</span>'+
+          '<span class="pa-badge '+t.cls+'">'+t.text+'</span></div>'+
+        '<div class="pa-latest">{% trans "Latest whole-farm value" %}: <b>'+latestFarm(data.farm.series||[], m.key, m.unit)+'</b></div>'+
+        '<div class="pa-desc">'+m.desc+'</div>'+
+        '<canvas id="'+id+'"></canvas>';
+      cards.appendChild(card);
+
+      charts[id] = new Chart(document.getElementById(id).getContext('2d'), {
+        type:'line', data: buildDatasets(data, m.key),
+        options:{
+          responsive:true,
+          interaction:{mode:'index', intersect:false},
+          plugins:{ legend:{position:'bottom', labels:{boxWidth:12, usePointStyle:true}} },
+          scales:{ x:{ title:{display:true, text:'{% trans "Date imagery was captured" %}'} },
+                   y:{ title:{display:true, text: m.unit==='%'?'%':'{% trans "value" %}'} } }
+        }
+      });
+    });
+  }
+
+  function loadSeasonal(pid){
+    var empty=document.getElementById('pa-empty');
+    if (!pid){ document.getElementById('pa-cards').style.display='none';
+               document.getElementById('pa-summary').style.display='none'; empty.style.display='none'; return; }
+    fetch('/api/agri/seasonal/?project='+pid, {credentials:'same-origin'})
+      .then(function(r){return r.json();}).then(render)
+      .catch(function(){ empty.style.display='block'; empty.textContent='{% trans "Could not load seasonal data." %}';
+        document.getElementById('pa-cards').style.display='none'; });
+  }
+
+  function loadFarms(){
+    var sel=document.getElementById('pa-farm');
+    fetch('/api/projects/?ordering=-created_at', {credentials:'same-origin'})
+      .then(function(r){return r.json();}).then(function(res){
+        var projects = res.results || res;
+        sel.innerHTML = '<option value="">{% trans "Select a farm…" %}</option>';
+        projects.forEach(function(p){
+          var o=document.createElement('option'); o.value=p.id; o.textContent=p.name; sel.appendChild(o);
+        });
+        sel.onchange=function(){ loadSeasonal(sel.value); };
+        if (projects.length===1){ sel.value=projects[0].id; loadSeasonal(projects[0].id); }
+      })
+      .catch(function(){ sel.innerHTML='<option value="">{% trans "Could not load farms" %}</option>'; });
+  }
+
+  loadFarms();
+})();
+</script>
+{% endblock %}

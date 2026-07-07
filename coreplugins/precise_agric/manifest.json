@@ -1,0 +1,13 @@
+{
+	"name": "Precise Agric",
+	"webodmMinVersion": "2.5.0",
+	"description": "Draw field boundaries, run agronomic analysis, and review results directly on the map.",
+	"version": "0.1.0",
+	"author": "Precise Agric System",
+	"email": "",
+	"repository": "",
+	"tags": ["agriculture", "boundary", "analysis"],
+	"homepage": "",
+	"experimental": true,
+	"deprecated": false
+}

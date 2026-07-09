@@ -36,6 +36,17 @@ services:
       - WO_DEV_WATCH_PLUGINS
       - WO_SECRET_KEY
       - WEB_CONCURRENCY
+      # Precise Agric: AgriTrack + remote-sense integration config (read in
+      # webodm/settings.py). Must be listed here or they never reach the
+      # container and every X-Api-Key check rejects with 401.
+      - WO_AGRITRACK_INBOUND_API_KEY
+      - WO_AGRITRACK_SYNC_OWNER_USERNAME
+      - WO_AGRITRACK_RESULTS_PUSH_URL
+      - WO_AGRITRACK_OUTBOUND_API_KEY
+      - WO_AGRITRACK_PUBLIC_BASE_URL
+      - WO_AGRITRACK_PUSH_URL
+      - WO_REMOTE_SENSE_INBOUND_API_KEY
+      - WO_REMOTE_SENSE_BASE_URL
     restart: unless-stopped
     oom_score_adj: 0
   broker:
@@ -58,5 +69,15 @@ services:
       - WO_DEBUG
       - WO_SECRET_KEY
       - WEB_CONCURRENCY
+      # Precise Agric: the worker runs the outbound AgriTrack results push, so it
+      # needs the push URL/keys + public base URL (asset links). See webapp above.
+      - WO_AGRITRACK_INBOUND_API_KEY
+      - WO_AGRITRACK_SYNC_OWNER_USERNAME
+      - WO_AGRITRACK_RESULTS_PUSH_URL
+      - WO_AGRITRACK_OUTBOUND_API_KEY
+      - WO_AGRITRACK_PUBLIC_BASE_URL
+      - WO_AGRITRACK_PUSH_URL
+      - WO_REMOTE_SENSE_INBOUND_API_KEY
+      - WO_REMOTE_SENSE_BASE_URL
     restart: unless-stopped
     oom_score_adj: 250

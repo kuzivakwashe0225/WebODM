@@ -313,6 +313,16 @@ Kept here because every one of these produced a confusing/misleading error messa
    server tracks (`git log origin/<branch>..HEAD` on your dev machine will show unpushed commits if so),
    or (b) pushed but the server was never rebuilt (see "Deploying a code change" above) — a `git pull`
    with no rebuild changes nothing for anything baked into the image.
+8. **`/api/v1/mobile/sync` (or `/remote-sense/push`) returns `401 "missing or invalid API key"` even
+   with the correct `X-Api-Key`** — the integration env vars weren't reaching the container. Docker only
+   injects variables listed under a service's `environment:` (or `env_file:`); the `WO_AGRITRACK_*` /
+   `WO_REMOTE_SENSE_*` vars were in `.env` but not in `docker-compose.yml`'s `environment:` lists, so
+   `os.environ.get(...)` returned `None` inside the container and every key check rejected. Fixed by
+   adding them to the `webapp` **and** `worker` `environment:` blocks in `docker-compose.yml`. Verify
+   the value actually made it in: `docker exec webapp env | grep WO_AGRITRACK_INBOUND_API_KEY`. This
+   also silently disables the outbound results push (the worker reads `WO_AGRITRACK_RESULTS_PUSH_URL`
+   from its own env) — same root cause, same fix. A `404` on `/api/v1/remote-sense/push` (vs `401`) is a
+   *different* problem: the route doesn't exist yet because the image predates that code — rebuild.
 
 ## Sizing note
 Raw drone-image processing (NodeODM) is CPU/RAM/disk heavy; make sure this project's VPS allocation

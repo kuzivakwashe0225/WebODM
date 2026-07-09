@@ -398,6 +398,20 @@ AGRITRACK_OUTBOUND_API_KEY = os.environ.get('WO_AGRITRACK_OUTBOUND_API_KEY') or 
 #   server has no way to reach us on localhost).
 AGRITRACK_PUBLIC_BASE_URL = os.environ.get('WO_AGRITRACK_PUBLIC_BASE_URL') or None
 
+# Remote-sense (Sentinel) integration: an external system pushes a georeferenced
+# GeoTIFF tagged with an AgriTrack farm id; we import it as a Capture on that
+# farm's Project and seed its fields from the synced AgriFields (see
+# agri/remote_sense/). Distinct key from AgriTrack's so it can be rotated on its
+# own and a leak of one doesn't compromise the other.
+# - shared secret the remote-sense system must send as X-Api-Key on POST
+#   /api/v1/remote-sense/push. None means the endpoint rejects everything.
+REMOTE_SENSE_INBOUND_API_KEY = os.environ.get('WO_REMOTE_SENSE_INBOUND_API_KEY') or None
+# - base URL of the remote-sense system, used ONLY for the optional pull mode
+#   (POST {farm_id, image_url}): we fetch image_url and require it to live under
+#   this base (SSRF guard), sending the key above as X-Api-Key. None disables
+#   pull mode entirely (push-a-file mode still works).
+REMOTE_SENSE_BASE_URL = os.environ.get('WO_REMOTE_SENSE_BASE_URL') or None
+
 # Maximum number of processing nodes to show in "Processing Nodes" menus/dropdowns
 UI_MAX_PROCESSING_NODES = None
 

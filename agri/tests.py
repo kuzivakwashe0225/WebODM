@@ -1079,3 +1079,117 @@ class TestAgriTrackSync(BootTestCase):
             "task": str(task.id), "agri_field": agri_field.id
         }, format="json")
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+REMOTE_SENSE_URL = "/api/v1/remote-sense/push"
+
+
+class TestRemoteSensePush(BootTestCase):
+    """
+    Inbound Sentinel/remote-sense GeoTIFF delivery (agri/remote_sense/).
+
+    Same settings-module caveat as TestAgriTrackSync: the view reads
+    `from webodm import settings`, so we mutate the module directly rather than
+    using @override_settings.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._orig_rs_key = getattr(settings, 'REMOTE_SENSE_INBOUND_API_KEY', None)
+        self._orig_agri_key = getattr(settings, 'AGRITRACK_INBOUND_API_KEY', None)
+        settings.REMOTE_SENSE_INBOUND_API_KEY = "rs-shared-secret"
+        settings.AGRITRACK_INBOUND_API_KEY = "test-shared-secret"
+
+    def tearDown(self):
+        settings.REMOTE_SENSE_INBOUND_API_KEY = self._orig_rs_key
+        settings.AGRITRACK_INBOUND_API_KEY = self._orig_agri_key
+        super().tearDown()
+
+    def _sync_farm(self):
+        APIClient().post(SYNC_URL, FARM_PAYLOAD, format="json",
+                         HTTP_X_API_KEY="test-shared-secret")
+
+    def _tif_upload(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        with open("app/fixtures/orthophoto.tif", "rb") as f:
+            return SimpleUploadedFile("sentinel.tif", f.read(), content_type="image/tiff")
+
+    def test_push_requires_api_key(self):
+        client = APIClient()
+        res = client.post(REMOTE_SENSE_URL, {"farm_id": 3, "orthophoto": self._tif_upload()},
+                          format="multipart")
+        self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        res = client.post(REMOTE_SENSE_URL, {"farm_id": 3, "orthophoto": self._tif_upload()},
+                          format="multipart", HTTP_X_API_KEY="wrong")
+        self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_push_unknown_farm_returns_404(self):
+        # Valid key, but farm was never synced -> 404 (before any capture is made).
+        client = APIClient()
+        res = client.post(REMOTE_SENSE_URL, {"farm_id": 999999, "orthophoto": self._tif_upload()},
+                          format="multipart", HTTP_X_API_KEY="rs-shared-secret")
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_push_happy_path_returns_201(self):
+        # Isolated from the (eager) import pipeline by mocking the ingest service.
+        self._sync_farm()
+        from agri.models import AgriFarm
+        project = AgriFarm.objects.get(agritrack_farm_id=3).project
+        fake_task = Task.objects.create(project=project, name="Fake")
+
+        with mock.patch("agri.remote_sense.views.ingest_capture",
+                        return_value=fake_task) as m:
+            client = APIClient()
+            res = client.post(REMOTE_SENSE_URL,
+                              {"farm_id": 3, "orthophoto": self._tif_upload(),
+                               "capture_date": "2026-05-01"},
+                              format="multipart", HTTP_X_API_KEY="rs-shared-secret")
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data["captureId"], str(fake_task.id))
+        self.assertEqual(res.data["projectId"], project.id)
+        # farm_id + file + parsed date were forwarded to the service
+        _, kwargs = m.call_args
+        self.assertEqual(kwargs["farm_id"], "3")
+        self.assertIsNotNone(kwargs["orthophoto_file"])
+        self.assertEqual(str(kwargs["capture_date"]), "2026-05-01")
+
+    def test_ingest_creates_capture_and_seeds_agrifields(self):
+        from agri.remote_sense.ingest import ingest_capture
+        from agri.models import AgriFarm, AgriField, CaptureMeta
+        import datetime
+
+        self._sync_farm()
+        farm = AgriFarm.objects.get(agritrack_farm_id=3)
+        agri_field = AgriField.objects.get(agritrack_field_id=7)
+
+        with open("app/fixtures/orthophoto.tif", "rb") as f:
+            task = ingest_capture(farm_id=3, orthophoto_file=f, image_url=None,
+                                  name="Sentinel A",
+                                  capture_date=datetime.date(2026, 5, 1),
+                                  dispatch=False)
+
+        # Capture landed on the farm's project, with the given acquisition date.
+        self.assertEqual(task.project_id, farm.project_id)
+        self.assertEqual(CaptureMeta.objects.get(task=task).capture_date,
+                         datetime.date(2026, 5, 1))
+        # The synced field was seeded as a DRAFT boundary linked back to the
+        # AgriField (so its analysis is pushable to AgriTrack per-field).
+        boundaries = list(Boundary.objects.filter(task=task))
+        self.assertEqual(len(boundaries), 1)
+        self.assertEqual(boundaries[0].agri_field_id, agri_field.id)
+        self.assertEqual(boundaries[0].status, Boundary.DRAFT)
+        self.assertTrue(boundaries[0].geom.equals(agri_field.boundary))
+
+    def test_ingest_unknown_farm_raises(self):
+        from agri.remote_sense.ingest import ingest_capture, FarmNotFoundError
+        with open("app/fixtures/orthophoto.tif", "rb") as f:
+            with self.assertRaises(FarmNotFoundError):
+                ingest_capture(farm_id=424242, orthophoto_file=f, dispatch=False)
+
+    def test_ingest_requires_file_or_url(self):
+        from agri.remote_sense.ingest import ingest_capture, RemoteSenseValidationError
+        self._sync_farm()
+        with self.assertRaises(RemoteSenseValidationError):
+            ingest_capture(farm_id=3, orthophoto_file=None, image_url=None,
+                           dispatch=False)

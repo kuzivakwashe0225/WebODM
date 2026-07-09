@@ -208,6 +208,54 @@ Two independent, one-directional integrations — not a request/response pair:
   and can iterate on payload shape; a hang/timeout means a network path problem (see hairpin-NAT note
   above).
 
+## Remote-sense (Sentinel) GeoTIFF ingestion
+A third external system (the custom remote-sensing / Sentinel pipeline) pushes a **georeferenced
+GeoTIFF** for a farm into this system, tagged with the same **AgriTrack farm id** the mobile app uses.
+The image is imported as a Capture on that farm's Project — no NodeODM/processing node, because a
+satellite orthophoto is *already* georeferenced (reuses WebODM's external-import path via
+[agri/capture.py](../agri/capture.py), same as a manual `.tif` upload).
+
+- **Endpoint (they push to you):**
+  `POST https://preciseagric.tawananyasha.com/api/v1/remote-sense/push`, header
+  `X-Api-Key: <WO_REMOTE_SENSE_INBOUND_API_KEY>` — a **separate** key from AgriTrack's (independent
+  rotation; a leak of one doesn't compromise the other).
+- **Two delivery modes** (handled by [agri/remote_sense/views.py](../agri/remote_sense/views.py)):
+  1. **File push (primary)** — `multipart/form-data` with `farm_id` (required, the AgriTrack farm id),
+     `orthophoto` (the `.tif`), optional `capture_date` (`YYYY-MM-DD`, the seasonal-graph x-axis) and
+     `name`.
+  2. **URL pull (optional)** — JSON `{"farm_id":…, "image_url":"https://<remote-sense-host>/…tif", …}`.
+     We fetch `image_url` ourselves; it is **SSRF-guarded** to only URLs under `WO_REMOTE_SENSE_BASE_URL`
+     and requires that var to be set. Leave `WO_REMOTE_SENSE_BASE_URL` blank to allow file push only.
+- **The farm must already be synced from AgriTrack first.** We resolve `farm_id` →
+  `AgriFarm.agritrack_farm_id` → its Project; an unknown farm returns `404` (we never auto-create it,
+  since without the synced farm + its fields there's nothing to fit the image onto). So the ordering is
+  always: mobile app creates farm → AgriTrack syncs it to us (`/api/v1/mobile/sync`) → remote-sense
+  pushes imagery for it.
+- **"Fits exactly on the farm":** on the *first* capture of a freshly-synced farm there's no prior
+  capture to copy field boundaries from, so we seed DRAFT boundaries straight from the farm's synced
+  AgriFields (their authoritative boundaries, linked via `agri_field`). The georeferencing itself is the
+  remote-sense system's responsibility — the `.tif` must carry a correct CRS/extent that covers the
+  farm's field polygons; this system does not warp or reproject.
+- **After ingest**, the normal review flow applies: an Admin/Agronomist approves the seeded field
+  boundary, an analysis run is created + approved, and results push back to AgriTrack per-field (the
+  `agri_field` link is what carries `farm_id`/`field_id` on that outbound push). Boundaries land as
+  DRAFT (human review gate preserved) — full unattended automation (auto-approve + auto-run + auto-push)
+  would be a deliberate follow-up decision, not the default.
+- **`.env` additions:**
+  ```
+  WO_REMOTE_SENSE_INBOUND_API_KEY=<key shared with the remote-sense team>
+  WO_REMOTE_SENSE_BASE_URL=<remote-sense host, only if using URL-pull mode; else leave blank>
+  ```
+- **Manual test** (run from the server after syncing at least one farm, e.g. farm id `3`):
+  ```bash
+  curl -v -X POST https://preciseagric.tawananyasha.com/api/v1/remote-sense/push \
+    -H "X-Api-Key: <WO_REMOTE_SENSE_INBOUND_API_KEY>" \
+    -F "farm_id=3" -F "capture_date=2026-05-01" \
+    -F "orthophoto=@/path/to/sentinel.tif"
+  ```
+  Expect `201 {"status":"ok","captureId":…,"projectId":…}`; a `404` means that farm id was never synced
+  from AgriTrack; a `401` means the key is wrong.
+
 ## Maintenance
 - **Logs:** `docker logs -f webapp` / `docker logs -f worker`.
 - **Stop:** `docker compose -p preciseagric -f docker-compose.yml -f docker-compose.nodeodm.yml -f docker-compose.localbind.yml down`

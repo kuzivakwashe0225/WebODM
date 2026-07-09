@@ -69,8 +69,12 @@ def create_capture_from_orthophoto(project, orthophoto, name="Imported Capture",
         # Reuse the farm's established field boundaries: the FIRST upload sets the
         # fields up (draw + approve); every later upload of the same farm inherits
         # them automatically, so the same areas are analyzed consistently over the
-        # season without redrawing. No-op on the first upload (no fields yet).
-        clone_farm_fields_to_capture(task)
+        # season without redrawing. On the very first capture of an AgriTrack-synced
+        # farm there is no prior capture to clone from, so fall back to seeding the
+        # boundaries straight from the farm's synced AgriFields -- this is what makes
+        # an imported satellite image line up with the fields drawn in the mobile app.
+        if not clone_farm_fields_to_capture(task):
+            seed_boundaries_from_agrifields(task)
 
     if dispatch:
         worker_tasks.process_task.delay(task.id)
@@ -112,7 +116,46 @@ def clone_farm_fields_to_capture(task):
                 project=task.project, name=src.name)
             src.field = field
             src.save(update_fields=['field'])
+        # Carry the AgriTrack link forward too, so every capture's analysis (not
+        # just the first) is pushable back to AgriTrack per-field (results.py keys
+        # the outbound push off boundary.agri_field).
         created.append(Boundary.objects.create(
-            task=task, field=field, name=src.name, geom=src.geom,
-            status=Boundary.DRAFT))
+            task=task, field=field, agri_field=src.agri_field, name=src.name,
+            geom=src.geom, status=Boundary.DRAFT))
+    return created
+
+
+def seed_boundaries_from_agrifields(task):
+    """
+    Seed DRAFT boundaries on a capture directly from the farm's AgriTrack-synced
+    Fields (their authoritative boundaries). Used for the first capture of a
+    freshly-synced farm, which has no prior capture to clone from -- without this
+    the imported image would have no fields to review/analyze.
+
+    Each seeded boundary keeps its `agri_field` link (so its analysis pushes back
+    to AgriTrack per-field) and a stable `field` identity (so it lines up across
+    the season). No-op on farms that aren't AgriTrack-linked or whose fields have
+    no boundary yet. Returns the created Boundaries.
+    """
+    from agri.models import AgriFarm, AgriField, Field, Boundary
+
+    agri_farm = AgriFarm.objects.filter(project_id=task.project_id).first()
+    if agri_farm is None:
+        return []
+
+    created = []
+    for af in AgriField.objects.filter(farm=agri_farm):
+        if af.boundary is None:
+            continue
+        name = af.name or ("AgriTrack Field %s" % af.agritrack_field_id)
+        field = Field.objects.filter(agri_field=af).first()
+        if field is None:
+            field, _created = Field.objects.get_or_create(
+                project=task.project, name=name, defaults={'agri_field': af})
+            if field.agri_field_id is None:
+                field.agri_field = af
+                field.save(update_fields=['agri_field'])
+        created.append(Boundary.objects.create(
+            task=task, agri_field=af, field=field, name=name,
+            geom=af.boundary, status=Boundary.DRAFT))
     return created

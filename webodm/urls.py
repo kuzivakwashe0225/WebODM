@@ -26,6 +26,7 @@ from drf_yasg.views import get_schema_view
 from drf_yasg import openapi
 
 from agri.agritrack.views import MobileSyncView
+from agri.remote_sense.views import RemoteSensePushView
 
 admin.site.site_header = 'WebODM Administration'
 
@@ -48,6 +49,10 @@ urlpatterns = [
     # Exact literal path required by the AgriTrack integration contract (§6.1) --
     # not under /api/agri/, since AgriTrack's own client calls this path directly.
     url(r'^api/v1/mobile/sync$', MobileSyncView.as_view(), name='agritrack-mobile-sync'),
+    # Remote-sense (Sentinel) GeoTIFF delivery -- external server-to-server push,
+    # X-Api-Key auth. Literal path (not under /api/agri/) for the same reason as
+    # the mobile sync above: the remote-sense client calls this path directly.
+    url(r'^api/v1/remote-sense/push$', RemoteSensePushView.as_view(), name='remote-sense-push'),
     re_path(r'^swagger(?P<format>\.json|\.yaml)$', schema_view.without_ui(cache_timeout=0), name='schema-json'),
     re_path(r'^swagger/$', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
     re_path(r'^redoc/$', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),

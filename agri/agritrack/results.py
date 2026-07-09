@@ -77,6 +77,33 @@ def classify_plant_health(index_name, mean_value):
     return POOR, health_score
 
 
+def _summary_to_text(summary):
+    """
+    AgriTrack's live /orthophoto/analysis/push expects `summary` as a string;
+    our internal report builder (agri/analysis/report.py) produces it as a
+    dict of stats. Render the known keys into a short human-readable line.
+    """
+    if not summary:
+        return ""
+    parts = []
+    index_name = summary.get('plant_health_index')
+    mean = summary.get('plant_health_mean')
+    if index_name and mean is not None:
+        parts.append("%s mean %.2f" % (index_name, mean))
+    elif index_name:
+        parts.append(index_name)
+    canopy_pct = summary.get('canopy_pct')
+    if canopy_pct is not None:
+        parts.append("canopy cover %.1f%%" % canopy_pct)
+    weed_count = summary.get('weed_count')
+    if weed_count is not None:
+        parts.append("%d weed hotspot(s)" % weed_count)
+    grid_cells = summary.get('grid_cells')
+    if grid_cells is not None:
+        parts.append("%d grid cells" % grid_cells)
+    return "; ".join(parts)
+
+
 def build_orthophoto_result_payload(run):
     """
     Builds the payload for AgriTrack's live POST /orthophoto/analysis/push,
@@ -140,7 +167,7 @@ def build_orthophoto_result_payload(run):
         'scope': 'field',
         'metrics': metrics,
         'outputs': outputs,
-        'summary': summary,
+        'summary': _summary_to_text(summary),
         'recommendations': recommendations,
         'ext_id': 'webodm-run-%s' % run.id,
     }

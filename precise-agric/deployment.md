@@ -5,10 +5,11 @@ Progress, boundary reuse, and Farm terminology) onto the shared **Center of AI C
 following that server's mandatory rules: only 80/443 exposed externally, Caddy owns all routing,
 every project on a unique internal port, folderized under `~/cai-apps/`, Docker-first.
 
-> Replace **`preciseagric.cai-servers.com`** below with your real subdomain once you have it (the CAI
-> guide's own examples used `cai-servers.com`/`tawananyasha.com` — confirm the actual domain with your
-> team). Internal port used throughout: **`8010`** — **register this in the team's port registry**
-> before starting (8001 and 36981 were already taken at time of writing).
+> **Live values as of this deployment:** domain `preciseagric.tawananyasha.com`, internal port `8011`
+> (not `8010` — `8010` hit a persistent, misleading `"address already in use"` error that turned out to
+> be the ports-merge bug described in Step 5, not a real conflict; switching ports was how it was first
+> noticed, `!override` is what actually fixed it). VM: Contabo `161.97.176.218`. Register whatever port
+> you end up using in the team's port registry before starting.
 
 ---
 
@@ -54,19 +55,32 @@ nano .env
 ```
 Set:
 ```
-WO_HOST=preciseagric.cai-servers.com
-WO_PORT=8010
+WO_HOST=preciseagric.tawananyasha.com
+WO_PORT=8011
 WO_DEBUG=NO
 WO_DEV=NO
 WO_SSL=NO
 WO_DEFAULT_NODES=1
 WO_SECRET_KEY=PASTE_A_LONG_RANDOM_STRING
-WO_AGRITRACK_PUBLIC_BASE_URL=https://preciseagric.cai-servers.com
-# Real AgriTrack production values (do NOT reuse the ngrok dev key from earlier testing):
-WO_AGRITRACK_RESULTS_PUSH_URL=https://<agritrack-host>/orthophoto/analysis/push
-WO_AGRITRACK_OUTBOUND_API_KEY=<real key from AgriTrack>
-WO_AGRITRACK_INBOUND_API_KEY=<a strong secret you choose, shared with AgriTrack for their sync calls>
+# Required -- docker-compose.yml has no defaults for these; a blank value produces
+# an "invalid spec: :/webodm/app/media:z: empty section between colons" error at startup:
+WO_MEDIA_DIR=appmedia
+WO_DB_DIR=dbdata
+# Required -- without this, WO_BROKER defaults to redis://localhost (settings.py), and
+# webapp/worker fail with "Error 111 connecting to localhost:6379. Connection refused."
+# because Redis actually lives in the separate `broker` container:
+WO_BROKER=redis://broker
+WO_AGRITRACK_PUBLIC_BASE_URL=https://preciseagric.tawananyasha.com
+WO_AGRITRACK_RESULTS_PUSH_URL=http://<agritrack-backend-host>:<port>/orthophoto/analysis/push
+WO_AGRITRACK_OUTBOUND_API_KEY=<key AgriTrack's team gives you, for calls you make to them>
+WO_AGRITRACK_INBOUND_API_KEY=<a strong secret you generate, shared with AgriTrack for their sync calls to you>
 ```
+> **`webodm.sh` uses `source .env` (webodm.sh:32), not a docker-compose-style parse** — so any unescaped
+> shell-special character in a value breaks it. A literal placeholder like `https://<agritrack-host>/...`
+> left in `.env` fails with `.env: line 9: agritrack-host: No such file or directory` — bash reads
+> `<agritrack-host` as input redirection. Always replace **every** `< >` placeholder with the real value
+> (no angle brackets) before running any `./webodm.sh` command.
+
 Generate the secret key:
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(50))"
@@ -84,13 +98,19 @@ This is the file that keeps WebODM off the public interface — only `127.0.0.1:
 reachable **only** via Caddy, never directly by IP:
 ```bash
 cat > docker-compose.localbind.yml <<'EOF'
-version: '2.1'
 services:
   webapp:
-    ports:
+    ports: !override
       - "127.0.0.1:${WO_PORT}:8000"
 EOF
 ```
+> **Must use `ports: !override`** (needs Compose v2.24+ — check with `docker compose version`), not a
+> plain `ports:` list. `docker-compose.yml`'s base `webapp` service already defines
+> `ports: - "${WO_PORT}:8000"` (unbound). Without `!override`, Compose **appends** this file's entry
+> instead of replacing it, so the container ends up with *two* publish rules for the same host port —
+> one unbound, one bound to `127.0.0.1`. The unbound one grabs the port first, and the second bind then
+> fails with a misleading `"address already in use"` error that looks like an external conflict but
+> isn't. (This cost a long debugging session the first time — see Troubleshooting below.)
 
 ## 6. Start the stack (bypassing `webodm.sh start`'s own port/SSL logic)
 ```bash
@@ -143,14 +163,50 @@ field, run analysis, confirm the heatmap and grid zones show correctly on the ma
 ---
 
 ## AgriTrack in production
-- **Inbound** farm sync: AgriTrack calls `POST https://preciseagric.cai-servers.com/api/v1/mobile/sync`
-  with `X-Api-Key: <WO_AGRITRACK_INBOUND_API_KEY>`.
-- **Outbound** results push: your server posts to `WO_AGRITRACK_RESULTS_PUSH_URL` with
-  `WO_AGRITRACK_OUTBOUND_API_KEY`; asset links use `WO_AGRITRACK_PUBLIC_BASE_URL` (your subdomain) so
-  AgriTrack can fetch heatmap/index images over HTTPS.
+Two independent, one-directional integrations — not a request/response pair:
+
+- **Inbound** farm sync (AgriTrack → you): AgriTrack's backend calls
+  `POST https://preciseagric.tawananyasha.com/api/v1/mobile/sync` with header
+  `X-Api-Key: <WO_AGRITRACK_INBOUND_API_KEY>` (a secret **you** generate — e.g.
+  `python3 -c "import secrets; print(secrets.token_urlsafe(40))"` — and hand to AgriTrack out-of-band,
+  never in a doc/ticket). Body is the canonical sync payload (contract §6.2): `farmId`, `farmerId`,
+  `farm: {name, location}`, `boundaries: {farm: <geojson>}`, `fields: [{fieldId, name, crop, area_ha,
+  boundary: <geojson>}]`. Handled by `MobileSyncView` ([agri/agritrack/views.py](../agri/agritrack/views.py))
+  → `sync_farm_payload` ([agri/agritrack/sync.py](../agri/agritrack/sync.py)), which upserts a
+  `Project`/`AgriFarm`/`AgriField`, idempotently. `agritrack_farm_id`/`agritrack_field_id` are
+  `IntegerField`s ([agri/models/agritrack.py](../agri/models/agritrack.py)) — AgriTrack must send numeric
+  IDs.
+- **Outbound** results push (you → AgriTrack): fires automatically when an agronomist approves an
+  `AnalysisRun` in the WebODM UI (`AnalysisRunViewSet.approve` in
+  [agri/api/views.py](../agri/api/views.py) → Celery task `push_analysis` → `push_orthophoto_results` in
+  [agri/agritrack/results.py](../agri/agritrack/results.py)). Only fires if the run's boundary is linked
+  to an AgriField that came from an inbound sync (nothing to report otherwise). POSTs to
+  `WO_AGRITRACK_RESULTS_PUSH_URL` (AgriTrack's live `POST /orthophoto/analysis/push`, or
+  `/orthophoto/analysis/push/batch` for batched — endpoint + `WO_AGRITRACK_OUTBOUND_API_KEY` both come
+  **from** AgriTrack's team, not chosen by you) with header `X-Api-Key: <WO_AGRITRACK_OUTBOUND_API_KEY>`.
+  Asset links (heatmap/index/weed maps) are built from `WO_AGRITRACK_PUBLIC_BASE_URL` (your own subdomain)
+  so AgriTrack can fetch them over HTTPS.
+  - **Schema gotcha (fixed):** AgriTrack's live endpoint rejects `summary` as an object (`422 "Input
+    should be a valid string"`) — our report builder ([agri/analysis/report.py](../agri/analysis/report.py))
+    produces it as a dict. `build_orthophoto_result_payload` now renders it to a short string via
+    `_summary_to_text()` before sending. Caught by manually `curl`-ing the real endpoint with a dummy
+    payload — worth doing again after any change to the report/push payload shape.
+  - If AgriTrack's backend and your WebODM server turn out to be **the same physical VM** (same public
+    IP, different port), and the push hangs/times out over the public IP, try `127.0.0.1:<port>` instead
+    — some hosts don't support a box calling back into its own public IP (hairpin NAT).
 - **Rotate the dev AgriTrack key** used during local testing (`atk_2184…`) — it was pushed to a public
   fork earlier in this branch's history and should be treated as compromised even though `.env` is now
   untracked going forward.
+- **Manual connectivity test** (run from the server, before relying on a real approval):
+  ```bash
+  curl -v -X POST <WO_AGRITRACK_RESULTS_PUSH_URL> \
+    -H "X-Api-Key: <WO_AGRITRACK_OUTBOUND_API_KEY>" \
+    -H "Content-Type: application/json" \
+    -d '{"field_id":1,"farm_id":1,"analysis_date":"2026-07-09","scope":"field","metrics":{},"outputs":{},"summary":"","recommendations":[],"ext_id":"connectivity-test"}'
+  ```
+  A `401`/`403` means the key is wrong; a `422` with field-specific errors means you're reaching AgriTrack
+  and can iterate on payload shape; a hang/timeout means a network path problem (see hairpin-NAT note
+  above).
 
 ## Maintenance
 - **Logs:** `docker logs -f webapp` / `docker logs -f worker`.
@@ -158,12 +214,57 @@ field, run analysis, confirm the heatmap and grid zones show correctly on the ma
 - **Restart:** re-run the Step 6 `up -d` command (containers use `restart: unless-stopped`, so they
   also survive a server reboot automatically).
 - **⚠️ Never run `./webodm.sh update`** — it pulls the stock image and would wipe out your custom
-  build. To deploy new changes: `git pull origin ISAIAH_development` → `./webodm.sh rebuild` → re-run
-  Step 6's `up -d`.
+  build.
 - **Backups:** back up `appmedia/` (all imagery/results) and `dbdata/` (all farms/analysis) — these
   hold every farm's data. A simple nightly cron `tar` + off-box copy is enough to start.
 - **`.env` hygiene:** `.env` is gitignored and `chmod 600` — never `git add` it, never paste secrets
   into commit messages or PRs.
+
+## Deploying a code change (rebuild)
+Whenever `agri/`, `precise_agric`, or any other baked-in source changes on GitHub (only `coreplugins/`
+is live-mounted — see `docker-compose.yml`'s `webapp.volumes`), the running container has to be rebuilt
+from scratch; a `git pull` alone changes nothing on a running container.
+
+```bash
+cd ~/cai-apps/precise-agric
+git pull origin ISAIAH_development     # must show real commits, not "Already up to date" --
+                                        # if it says that, the change was never pushed to this branch
+./webodm.sh rebuild                    # rebuilds the image from source; 15-40 min first time, faster after
+docker rm -f webapp worker             # remove the two containers built from the (old) image
+set -a; source .env; set +a
+docker compose -p preciseagric \
+  -f docker-compose.yml -f docker-compose.nodeodm.yml \
+  -f docker-compose.localbind.yml up -d
+docker logs -f webapp                  # wait for the ready message; confirm no traceback
+```
+`db`, `broker`, and `node-odm` don't need to be touched — only `webapp`/`worker` run your custom image.
+
+## Troubleshooting log from the first deploy
+Kept here because every one of these produced a confusing/misleading error message on the surface:
+
+1. **`.env: line 9: agritrack-host: No such file or directory`** — a leftover `<placeholder>` with
+   unescaped `< >` in `.env`, which `webodm.sh` loads via `source` (a real bash parse, not KV-only).
+   Fix: replace every placeholder with a real value, no angle brackets.
+2. **`invalid spec: :/webodm/app/media:z: empty section between colons`** — `WO_MEDIA_DIR`/`WO_DB_DIR`
+   missing from `.env` (no defaults in `docker-compose.yml`). Fix: set both (see Step 3).
+3. **`failed to bind host port 127.0.0.1:PORT/tcp: address already in use`, with nothing found in
+   `ss`/`lsof`/`docker ps -a`** — not a real external conflict. Caused by `docker-compose.localbind.yml`
+   *appending* a second `ports:` entry instead of replacing the base file's unbound one (see Step 5's
+   `!override` note). Recreating with `docker rm -f webapp` alone doesn't fix it — the override file
+   itself needs the `!override` tag.
+4. **`webapp` container stuck with `NetworkSettings.Networks: {}`** (no network at all) — a side effect
+   of issue #3: a container that fails during network/port setup can be left half-created. Fix:
+   `docker rm -f webapp` and let Compose fully recreate it (don't just `docker start` an existing one).
+5. **`could not translate host name "db" to address"`** — usually means the `webapp`/`worker` container
+   isn't actually attached to the project's Docker network (see #4), not a DNS problem to chase on its
+   own.
+6. **`Error 111 connecting to localhost:6379. Connection refused`** — `WO_BROKER` missing from `.env`,
+   so Django's cache/Celery config falls back to `redis://localhost` (`webodm/settings.py:326-339`)
+   instead of the `broker` container. Fix: `WO_BROKER=redis://broker`.
+7. **Changes not appearing on the hosted site** — either (a) not actually pushed to the branch the
+   server tracks (`git log origin/<branch>..HEAD` on your dev machine will show unpushed commits if so),
+   or (b) pushed but the server was never rebuilt (see "Deploying a code change" above) — a `git pull`
+   with no rebuild changes nothing for anything baked into the image.
 
 ## Sizing note
 Raw drone-image processing (NodeODM) is CPU/RAM/disk heavy; make sure this project's VPS allocation

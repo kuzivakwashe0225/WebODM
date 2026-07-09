@@ -500,6 +500,9 @@ class TestAgri(BootTestCase):
         # Not computed by this pipeline -- must not be invented
         self.assertNotIn("plant_count", payload["metrics"])
         self.assertNotIn("height_mean_m", payload["metrics"])
+        # AgriTrack's live endpoint requires summary as a string, not our
+        # internal report dict (contract mismatch caught via manual curl test)
+        self.assertIsInstance(payload["summary"], str)
 
     def test_push_uses_agritrack_live_endpoint_when_field_linked(self):
         from agri.push import push_analysis

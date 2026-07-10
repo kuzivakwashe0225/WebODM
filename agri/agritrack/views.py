@@ -1,4 +1,5 @@
 import hmac
+import logging
 
 from rest_framework import status, permissions
 from rest_framework.response import Response
@@ -6,6 +7,8 @@ from rest_framework.views import APIView
 
 from webodm import settings
 from .sync import sync_farm_payload, SyncValidationError
+
+logger = logging.getLogger('app.logger')
 
 
 def _valid_api_key(provided):
@@ -35,6 +38,10 @@ class MobileSyncView(APIView):
         try:
             agri_farm = sync_farm_payload(request.data)
         except SyncValidationError as e:
+            # Logged server-side (not just returned to the caller) so a rejected
+            # sync's exact reason + payload is visible in `docker logs webapp`
+            # instead of only reaching AgriTrack's side as an opaque 400.
+            logger.warning("AgriTrack sync rejected: %s | payload=%r" % (str(e), request.data))
             return Response({'status': 'error', 'message': str(e)},
                             status=status.HTTP_400_BAD_REQUEST)
 

@@ -1009,6 +1009,99 @@ class TestAgri(BootTestCase):
         self.assertIsNone(by_source[CaptureMeta.DRONE]["valid_pixel_pct"])
         self.assertEqual(by_source[CaptureMeta.SATELLITE]["valid_pixel_pct"], 62.5)
 
+    # ---- Stage 10 Phase 6: historical baseline / anomaly detection ----
+
+    def test_anomaly_for_latest_pure_function(self):
+        # No DB, no network -- pure percentage-drop check over plain dicts,
+        # matching this session's established pure-function testing pattern.
+        from agri.api.seasonal import _anomaly_for_latest
+
+        # Not enough prior points (need >= MIN_BASELINE_POINTS = 2)
+        self.assertIsNone(_anomaly_for_latest([{'health_mean': 0.30}, {'health_mean': 0.20}]))
+
+        # Enough history, but the dip is under the 15% threshold -> no flag
+        points = [{'health_mean': 0.30}, {'health_mean': 0.32}, {'health_mean': 0.29}]
+        self.assertIsNone(_anomaly_for_latest(points))
+
+        # Latest ROSE relative to trailing average -> never flagged, even
+        # though it "deviates" -- only drops are anomalies here.
+        points = [{'health_mean': 0.30}, {'health_mean': 0.32}, {'health_mean': 0.50}]
+        self.assertIsNone(_anomaly_for_latest(points))
+
+        # A real >=15% drop from the trailing average of the prior points
+        points = [{'health_mean': 0.30}, {'health_mean': 0.32}, {'health_mean': 0.20}]
+        result = _anomaly_for_latest(points)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result['trailing_avg'], 0.31)
+        self.assertLessEqual(result['deviation_pct'], -15.0)
+
+        # Missing latest value -> no flag, not a crash
+        points = [{'health_mean': 0.30}, {'health_mean': 0.32}, {'health_mean': None}]
+        self.assertIsNone(_anomaly_for_latest(points))
+
+        # Trailing average of exactly zero -> division-by-zero guard, not a crash
+        points = [{'health_mean': 0.0}, {'health_mean': 0.0}, {'health_mean': 0.05}]
+        self.assertIsNone(_anomaly_for_latest(points))
+
+    def test_compute_field_anomalies_pure_function(self):
+        # No DB, no network. Confirms grouping is strictly per (source,
+        # computed_by) -- a satellite/Sentinel group's numbers must never
+        # borrow or contaminate a drone/WebODM group's trailing average, even
+        # though both belong to the same field.
+        from agri.api.seasonal import compute_field_anomalies
+        from agri.models import CaptureMeta, AnalysisRun
+
+        series = [
+            # Drone/WebODM history: steady, then a real drop on 2026-08-01.
+            {'date': '2026-07-01', 'source': CaptureMeta.DRONE,
+             'computed_by': AnalysisRun.WEBODM, 'health_mean': 0.30},
+            {'date': '2026-07-15', 'source': CaptureMeta.DRONE,
+             'computed_by': AnalysisRun.WEBODM, 'health_mean': 0.32},
+            {'date': '2026-08-01', 'source': CaptureMeta.DRONE,
+             'computed_by': AnalysisRun.WEBODM, 'health_mean': 0.20},
+            # Satellite/Sentinel history: only 2 points ever -- never enough
+            # prior history to flag anything, despite an even bigger drop.
+            {'date': '2026-07-10', 'source': CaptureMeta.SATELLITE,
+             'computed_by': AnalysisRun.SENTINEL, 'health_mean': 0.29},
+            {'date': '2026-08-05', 'source': CaptureMeta.SATELLITE,
+             'computed_by': AnalysisRun.SENTINEL, 'health_mean': 0.10},
+        ]
+
+        anomalies = compute_field_anomalies(series)
+        self.assertEqual(set(anomalies.keys()),
+                         {('2026-08-01', CaptureMeta.DRONE, AnalysisRun.WEBODM)})
+
+    def test_seasonal_endpoint_flags_anomalous_drop(self):
+        # End-to-end: a real drop across 3 dates for one field surfaces as
+        # `anomaly` on the flagged point only, via the real API endpoint.
+        import datetime
+        from agri.models import Field, AnalysisRun, AnalysisResult, CaptureMeta
+
+        field = Field.objects.create(project=self.project, name="Anomaly Field")
+        means = [0.30, 0.32, 0.20]  # third point is a real drop
+        dates = [datetime.date(2026, 7, 1), datetime.date(2026, 7, 15), datetime.date(2026, 8, 1)]
+        for mean, d in zip(means, dates):
+            task = self._completed_capture("Anomaly Cap %s" % d)
+            CaptureMeta.objects.filter(task=task).update(capture_date=d)
+            boundary = Boundary.objects.create(task=task, geom=task.orthophoto_extent,
+                                               status=Boundary.APPROVED, created_by=self.user,
+                                               field=field)
+            run = AnalysisRun.objects.create(task=task, boundary=boundary,
+                                             status=AnalysisRun.PENDING_REVIEW, triggered_by=self.user)
+            AnalysisResult.objects.create(run=run, kind=AnalysisResult.PLANT_HEALTH, stats={'mean': mean})
+
+        client = APIClient()
+        client.login(username="testuser", password="test1234")
+        res = client.get("/api/agri/seasonal/?project=%s" % self.project.id)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        series = res.data["fields"][0]["series"]
+        by_date = {p["date"]: p for p in series}
+        self.assertIsNone(by_date["2026-07-01"]["anomaly"])
+        self.assertIsNone(by_date["2026-07-15"]["anomaly"])
+        self.assertIsNotNone(by_date["2026-08-01"]["anomaly"])
+        self.assertLessEqual(by_date["2026-08-01"]["anomaly"]["deviation_pct"], -15.0)
+
 
 class TestAgriRawImageCapture(BootTransactionTestCase):
     """

@@ -36,16 +36,20 @@
   .pa-season .pa-timeline-head .ttl { font-weight:700; font-size:16px; }
   .pa-season .pa-timeline-list { display:flex; flex-direction:column; gap:8px; max-height:360px;
       overflow-y:auto; }
-  .pa-season .pa-timeline-row { display:flex; align-items:center; gap:10px; padding:8px 10px;
+  .pa-season .pa-timeline-row { display:flex; flex-direction:column; gap:6px; padding:8px 10px;
       border:1px solid #e6ece7; border-radius:8px; font-size:13px; }
+  .pa-season .pa-timeline-row .pa-timeline-main { display:flex; align-items:center; gap:10px; }
   .pa-season .pa-timeline-row .date { font-weight:700; color:#1b3a2b; min-width:92px; }
   .pa-season .pa-timeline-row .src { font-size:16px; }
   .pa-season .pa-timeline-row .metric { flex:1; color:#37474f; }
   .pa-season .pa-timeline-row .engine { color:#8a998e; font-size:11.5px; }
+  .pa-season .pa-timeline-row .anomaly { background:#fdecea; color:#b3261e; border-radius:6px;
+      padding:6px 9px; font-size:12px; line-height:1.4; }
   @media (prefers-color-scheme: dark){
     .pa-season .pa-card { background:#20261f; border-color:#33402f; }
     .pa-season .pa-card .ttl { color:#e8f0e6; }
     .pa-season .pa-timeline { background:#20261f; border-color:#33402f; }
+    .pa-season .pa-timeline-row .anomaly { background:#3a1f1d; color:#f2b8b5; }
     .pa-season .pa-timeline-row { border-color:#33402f; }
     .pa-season .pa-timeline-row .date { color:#e8f0e6; }
     .pa-season .pa-timeline-row .metric { color:#cfe0d1; }
@@ -192,13 +196,21 @@
       var good = p.valid_pixel_pct >= 70;
       badge = '<span class="pa-badge '+(good?'good':'bad')+'">'+(good?'✓':'⚠')+' '+Math.round(p.valid_pixel_pct)+'% {% trans "valid" %}</span>';
     }
+    var anomaly = '';
+    if (p.anomaly){
+      var pct = Math.round(Math.abs(p.anomaly.deviation_pct));
+      anomaly = '<div class="anomaly">⚠ '+pct+'% {% trans "below this field\'s own trailing average" %} '+
+        '({% trans "was" %} '+p.anomaly.trailing_avg+') — {% trans "consider a drone follow-up" %}</div>';
+    }
     var row = document.createElement('div');
     row.className = 'pa-timeline-row';
     row.innerHTML =
-      '<span class="date">'+p.date+'</span>'+
-      '<span class="src" title="'+srcTitle+'">'+srcIcon+'</span>'+
-      '<span class="metric">'+timelineMetricText(p)+' <span class="engine">· '+engine+'</span></span>'+
-      badge;
+      '<div class="pa-timeline-main">'+
+        '<span class="date">'+p.date+'</span>'+
+        '<span class="src" title="'+srcTitle+'">'+srcIcon+'</span>'+
+        '<span class="metric">'+timelineMetricText(p)+' <span class="engine">· '+engine+'</span></span>'+
+        badge+
+      '</div>'+anomaly;
     return row;
   }
 

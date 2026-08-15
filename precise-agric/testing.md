@@ -305,6 +305,30 @@ syntax-checked by extracting the script, neutralizing its `{% trans %}` tags, an
 on the result — but it is **not** exercised in an actual browser, same gap flagged for the rest of the
 Stage 9/10 frontend.
 
+### Stage 10 Phase 6 — Historical baseline / anomaly detection (`TestAgri`, extended)
+
+A fixed percentage-drop-from-trailing-average rule, flagged as a badge on the Phase 5 timeline, per
+[stage-10-sentinel-roadmap.md](stages/stage-10-sentinel-roadmap.md) Phase 6. Unlike every other phase this
+session, there is no live API surface here at all (pure computation over already-stored `AnalysisResult`
+stats) and no real production history to verify against yet — so this phase leans harder on fixture-based
+unit tests than any before it.
+
+| Test | Verifies |
+|---|---|
+| `test_anomaly_for_latest_pure_function` | `_anomaly_for_latest()` over plain dicts: not enough prior history → `None`; a dip under the 15% threshold → `None`; a rise (never flagged, even though it "deviates") → `None`; a real ≥15% drop → flagged with `trailing_avg`/`deviation_pct`; a missing latest value → `None`, not a crash; a zero trailing average → `None`, not a `ZeroDivisionError` |
+| `test_compute_field_anomalies_pure_function` | Grouping is strictly per `(source, computed_by)` — a satellite/Sentinel group's numbers never contaminate a drone/WebODM group's trailing average for the same field, even when the satellite group's own (too-short) history would otherwise look like a bigger drop |
+| `test_seasonal_endpoint_flags_anomalous_drop` | End-to-end: 3 real `AnalysisRun`/`AnalysisResult` rows with controlled `stats={'mean': ...}` across 3 dates for one field; the real `/api/agri/seasonal/` response flags only the third (anomalous) point, leaves the first two `None` |
+
+**Result (2026-08-15): 108/110 green.** The same two pre-existing, unrelated failures as the original
+stage-9 baseline (`test_resolve_agri_field_falls_back_to_persistent_field_link` and the local-NodeODM
+test — both present this run, confirming Phase 5's single-failure run was the flaky test passing, not a
+change in what's broken).
+
+`season.html`'s new anomaly-badge JS was syntax-checked the same way as Phase 5's (extracted, `{% trans %}`
+tags neutralized, `node --check`) but **not** exercised in an actual browser — and, more fundamentally,
+there is no real accumulated data yet to see the anomaly rule fire against in practice. That's an honest,
+explicit limitation of this phase, not an oversight: the roadmap flagged it going in.
+
 ## Manual testing
 Step-by-step (rebrand visual checks + Boundary API via curl / browsable API / admin) is in
 [manual-testing.md](manual-testing.md).

@@ -1,17 +1,19 @@
 # Stage 10 — Sentinel Integration Roadmap (post Stage 9 audit)
 
-> **Status (2026-08-15): Phases 1–5 built and test-verified.** `TestSatellitePull` grew from 13 → 24 → 30
-> → 33 tests across Phases 1, 2, 4; Phases 3 and 5 each added 1 test to `TestAgri` instead (neither
-> touches the Sentinel client directly). Full `agri.tests` re-run after each phase: 94/96, then 100/102,
-> then 101/103, then 104/106, then 106/107 — the failures throughout are the same pre-existing,
-> unrelated-to-this-work issues already documented in stage-9 §13 (Phase 5's run hit only 1 of the usual
-> 2 — the flaky local-NodeODM test happened to pass this time, consistent with it being environmental, not
-> a new state; confirmed identical error signature on the one that did fail, never a new regression).
-> Three real bugs were found live-testing Phase 1's cloud-masking approach against the real Sentinel Hub
-> API *before* they became silent data-quality bugs — see §3 Phase 1. Phase 4's broader indices worked
-> cleanly on the first live run, no new bugs. Phase 5 found that its planned new endpoint was unnecessary —
-> the Stage 8 `SeasonalView` already did the job, so it was extended by one field instead of duplicated.
-> Phase 6 is still plan-only.
+> **Status (2026-08-15): All 6 phases built and test-verified.** `TestSatellitePull` grew from 13 → 24 →
+> 30 → 33 tests across Phases 1, 2, 4; Phases 3, 5, and 6 each added tests to `TestAgri` instead (none
+> touch the Sentinel client directly). Full `agri.tests` re-run after every phase: 94/96, 100/102, 101/103,
+> 104/106, 106/107, 108/110 — the failures throughout are the same pre-existing, unrelated-to-this-work
+> issues already documented in stage-9 §13 (Phase 5's run hit only 1 of the usual 2 — the flaky
+> local-NodeODM test happened to pass that time, consistent with it being environmental — and both were
+> back by Phase 6's run; every failure signature confirmed identical across all six runs, never a new
+> regression). Three real bugs were found live-testing Phase 1's cloud-masking approach against the real
+> Sentinel Hub API *before* they became silent data-quality bugs — see §3 Phase 1. Phase 4's broader
+> indices worked cleanly on the first live run, no new bugs. Phase 5 found that its planned new endpoint
+> was unnecessary — the Stage 8 `SeasonalView` already did the job, so it was extended by one field instead
+> of duplicated. Phase 6 (anomaly detection) could only be built and fixture-tested, not live-verified — no
+> real production history or Sentinel API surface is involved — and its two open product questions
+> (threshold rule, where it surfaces) were asked of the user directly rather than guessed.
 
 ## 1. Why this document exists
 
@@ -342,18 +344,58 @@ since stage-9 §13. `season.html`'s new JS was syntax-checked (template tags neu
 the extracted script) but **not exercised in an actual browser** — same gap already flagged for the rest
 of the Stage 9/10 frontend.
 
-### Phase 6 — Historical baselines & anomaly-driven drone dispatch
+### Phase 6 — Historical baselines & anomaly-driven drone dispatch — ✅ BUILT (2026-08-15)
 
 **Why:** matches this project's own pre-existing ambition in
 [stage-9-satellite-monitoring.md §10](stage-9-satellite-monitoring.md) ("Stage D": per-field historical
 baselines, anomaly scoring → drone-dispatch triage). The external proposal converges on the same idea
 independently — a good sign, not new information.
 
-**What:** accumulate enough satellite pull history per field to establish a baseline, then flag deviation
-(e.g. NDVI down >2σ from the field's own trailing average) as a suggestion to send a drone. Genuinely
-later-stage — needs real accumulated data to be meaningful, not just code.
+**Different from Phases 1–5:** this phase can only be *built and fixture-tested* today, not live-verified —
+there is no real accumulated production history yet for the anomaly rule to run against, and no Sentinel
+Hub API surface involved at all (this is pure computation over already-stored `AnalysisResult` stats, not
+a new external call). Two product decisions had no right answer without that history to tune against, so
+they were asked of the user directly rather than guessed:
 
-**Depends on:** Phases 1–2 in production for at least one season's worth of pulls.
+- **Anomaly rule: a fixed percentage-drop threshold**, not a statistical z-score. A z-score needs enough
+  points per field for a standard deviation to mean anything — fragile with the sparse data that actually
+  exists this early — while a fixed threshold is simple, explainable to a farmer, and works from the third
+  data point on.
+- **Surface: a badge on the Phase 5 Observation Timeline**, not a new dashboard-level alert list — reuses
+  the surface just built rather than opening a second one.
+
+**What was built:**
+- `agri/api/seasonal.py`: `ANOMALY_METRIC = 'health_mean'`, `ANOMALY_DROP_THRESHOLD_PCT = 15.0`,
+  `MIN_BASELINE_POINTS = 2`. `_anomaly_for_latest(chronological_points, metric)` — a pure function that
+  checks whether the last point in a list dropped ≥15% below the trailing average of everything before
+  it (only ever flags drops, never rises; needs ≥2 prior points; guards against a zero trailing average).
+  `compute_field_anomalies(series)` — groups a field's full series strictly by `(source, computed_by)`
+  before comparing, so a drone ExG value is never compared against a Sentinel NDVI value (same "never
+  blend" rule this module already applies to the farm-level average). `SeasonalView.get()` now attaches
+  `anomaly` (`None`, or `{trailing_avg, deviation_pct}`) to every point.
+- `coreplugins/precise_agric/templates/season.html`: each Observation Timeline row that carries an
+  `anomaly` now shows a second line — "⚠ N% below this field's own trailing average (was X) — consider a
+  drone follow-up" — styled as a warning bar directly under that row.
+
+**Files touched:** `agri/api/seasonal.py`, `coreplugins/precise_agric/templates/season.html`,
+`agri/tests.py` (3 new tests in `TestAgri`).
+
+**Verification:** `_anomaly_for_latest()` and `compute_field_anomalies()` unit-tested directly against
+plain dicts — no DB, no network, no fixtures beyond hand-built lists (insufficient history, a dip under
+threshold, a rise, a real drop, a missing value, a zero trailing average; and cross-source-group isolation
+specifically). One end-to-end test constructs 3 real `AnalysisRun`/`AnalysisResult` rows with controlled
+`stats={'mean': ...}` across 3 dates for one field and confirms the real `/api/agri/seasonal/` response
+flags only the third point. Real `./webodm.sh test backend agri.tests` run in `--dev` mode: 108/110 — the
+same two pre-existing, unrelated failures as the original stage-9 baseline (both present this run, unlike
+Phase 5's run where one happened to pass). `season.html`'s new anomaly-badge JS was syntax-checked the same way as
+Phase 5's but **not exercised in an actual browser** — same gap flagged for the rest of the Stage 9/10
+frontend, and here doubly honest: even if it rendered correctly, there's no real data yet to see it fire
+against in practice.
+
+**Not done (explicitly, matching the roadmap's own original caveat):** tuning `ANOMALY_DROP_THRESHOLD_PCT`
+against real farmer feedback, and the drone-*dispatch* half of "anomaly-driven drone dispatch" (this phase
+flags and surfaces; it doesn't create or suggest a specific drone task) — both need real usage this
+codebase doesn't have yet.
 
 ---
 

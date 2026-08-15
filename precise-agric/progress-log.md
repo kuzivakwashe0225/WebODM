@@ -477,7 +477,7 @@ masking, historical baselines, retention policy, and the pre-existing AgriField 
 
 ---
 
-## Stage 10 — Sentinel roadmap + Phases 1–5 (2026-08-14 to 2026-08-15) 🚧 Phases 1–5 done
+## Stage 10 — Sentinel roadmap, all 6 phases (2026-08-14 to 2026-08-15) ✅ Done
 
 **Roadmap.** User pasted an externally-drafted architecture review (not written against this codebase)
 proposing a "multi-source observation platform" direction. Reviewed it skeptically against the actual
@@ -624,5 +624,43 @@ its `{% trans %}` tags, and running `node --check` — clean. `./webodm.sh test 
 the one remaining failure is the same pre-existing, unrelated field-link issue confirmed every run this
 session.
 
-**Not done:** Phase 6 of the roadmap (historical baselines & anomaly-driven drone dispatch).
+**Not done (at Phase 5 checkpoint):** Phase 6 of the roadmap (historical baselines & anomaly-driven drone
+dispatch).
+
+**Phase 6 implementation — the last phase, and a different kind of phase.** Unlike Phases 1–5, this one
+has no live API surface (pure computation over already-stored `AnalysisResult` stats) and no real
+production history to verify against — the roadmap flagged this going in. Two product questions had no
+right answer without that history, so they were asked of the user directly instead of guessed: the
+anomaly rule (fixed percentage-drop threshold, chosen over a statistical z-score that needs more
+per-field history than exists this early to mean anything) and where it surfaces (a badge on the Phase 5
+Observation Timeline, reusing that surface rather than opening a new dashboard-level alert list).
+
+Built: `_anomaly_for_latest()` in `seasonal.py` — a pure function flagging a point when it dropped ≥15%
+below the trailing average of everything before it for the same field (never flags a rise, needs ≥2 prior
+points, guards a zero trailing average); `compute_field_anomalies()` — groups strictly by
+`(source, computed_by)` before comparing, so a drone value is never measured against a satellite baseline
+for the same field, matching this module's own pre-existing "never blend" rule. `SeasonalView` now
+attaches `anomaly` to every point. `season.html`'s timeline shows a warning line under any flagged row:
+"N% below this field's own trailing average — consider a drone follow-up."
+
+**Verified for real, as much as this phase allows:** `_anomaly_for_latest()` and
+`compute_field_anomalies()` unit-tested directly against hand-built fixture dicts (insufficient history, a
+sub-threshold dip, a rise, a real drop, a missing value, a zero-average edge case, and — the one that
+actually matters — cross-source-group isolation). One end-to-end test built 3 real `AnalysisRun` rows with
+controlled stats across 3 dates and confirmed the live endpoint flags only the anomalous one.
+`./webodm.sh test backend agri.tests` in `--dev` mode: 108/110 — same two pre-existing, unrelated failures
+as the original stage-9 baseline (both present this run, confirming Phase 5's single-failure run was just
+the flaky test passing that time, not a change in what's actually broken).
+
+**Honest limitation, not an oversight:** the threshold (15%) is a reasonable starting guess, not something
+tuned against real farmer feedback, and this phase flags/surfaces anomalies — it doesn't yet create or
+suggest an actual drone dispatch task. Both need real usage this codebase doesn't have yet, exactly as the
+roadmap said going in.
+
+**All 6 phases of the Stage 10 roadmap are now built and test-verified.** `TestSatellitePull` grew from 13
+to 33 tests across the phases that touch the Sentinel client directly (1, 2, 4); `TestAgri` picked up the
+rest (3, 5, 6). `agri/tests.py` sits at 110 tests, 108 green, with the same two pre-existing/unrelated
+issues the whole way through. The frontend across all six phases (Import-menu modal, season.html's
+timeline + anomaly badges) is syntax-checked but not browser-tested — a consistent, explicitly-flagged gap
+rather than a silent one.
 

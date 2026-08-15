@@ -220,6 +220,28 @@ result.
 
 `main.js`'s scene-list extension to the same modal is **not** browser-tested — same gap as Phase 1.
 
+### Stage 10 Phase 3 — Satellite eligibility table (`TestAgri`, extended)
+
+A plain constant dict replacing the two hardcoded `if satellite:` branches in `agri/services.py`
+(weed skip, canopy proxy flag), per
+[stage-10-sentinel-roadmap.md](stages/stage-10-sentinel-roadmap.md) Phase 3 — a pure refactor, not new
+behavior, so this landed in `TestAgri` rather than `TestSatellitePull` (nothing here touches the Sentinel
+client).
+
+| Test | Verifies |
+|---|---|
+| `test_satellite_eligible_table_covers_all_analysis_kinds` | `SATELLITE_ELIGIBLE`'s keys exactly match `AnalysisResult.KIND_CHOICES` (a 7th analysis service added later without a table entry fails this test, not silently falls through), and pins the three non-trivial values (`WEED: False`, `CANOPY: 'proxy'`, the rest `True`) |
+
+No behavior change, confirmed by the pre-existing Stage 9 tests
+(`test_weed_mapping_skipped_for_satellite_capture`,
+`test_canopy_flagged_low_resolution_proxy_for_satellite`, `test_report_includes_capture_source`,
+`test_run_analysis_orchestration`) passing unmodified against the refactored code.
+
+**Result (2026-08-15): 101/103 green.** The two failures are the *same* pre-existing, unrelated issues
+already documented above (confirmed identical error signatures across all four runs this session — Phase
+1, Phase 2, Phase 3, and the original stage-9 baseline — never new regressions). No live API surface here
+(pure in-process refactor), so no standalone verification script was needed this time.
+
 ## Manual testing
 Step-by-step (rebrand visual checks + Boundary API via curl / browsable API / admin) is in
 [manual-testing.md](manual-testing.md).

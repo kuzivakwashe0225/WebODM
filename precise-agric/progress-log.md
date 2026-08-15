@@ -477,7 +477,7 @@ masking, historical baselines, retention policy, and the pre-existing AgriField 
 
 ---
 
-## Stage 10 — Sentinel roadmap + Phases 1–2 (2026-08-14 to 2026-08-15) 🚧 Phases 1–2 done
+## Stage 10 — Sentinel roadmap + Phases 1–3 (2026-08-14 to 2026-08-15) 🚧 Phases 1–3 done
 
 **Roadmap.** User pasted an externally-drafted architecture review (not written against this codebase)
 proposing a "multi-source observation platform" direction. Reviewed it skeptically against the actual
@@ -541,7 +541,27 @@ in `--dev` mode: `TestSatellitePull` 30/30, full suite 100/102 — same two pre-
 as every prior run this session (confirmed identical error signatures again — zero new regressions across
 three consecutive full-suite runs now).
 
-**Not done:** Phases 3–6 of the roadmap (capability-table cleanup, broader Sentinel indices, observation
-timeline, historical baselines). `main.js`'s scene-list addition is not browser-tested, same gap as
-Phase 1.
+**Not done (at Phase 2 checkpoint):** Phases 3–6 of the roadmap (capability-table cleanup, broader
+Sentinel indices, observation timeline, historical baselines). `main.js`'s scene-list addition is not
+browser-tested, same gap as Phase 1.
+
+**Phase 3 implementation.** A pure in-process refactor — no Sentinel Hub API surface involved, so no
+standalone live-verification script was needed this time (same judgment call as Stage 9's non-network
+code). Consolidated `agri/services.py`'s two hardcoded `if satellite:` branches (weed skip, canopy proxy
+flag) into a single `SATELLITE_ELIGIBLE` constant dict keyed by the real `AnalysisResult.kind` constants,
+so a future typo or renamed kind fails a test rather than silently falling through. `execute_analysis()`
+now reads the table instead of hardcoding the decision a second time.
+
+**Verified for real:** added `test_satellite_eligible_table_covers_all_analysis_kinds` (asserts the
+table's keys exactly match `AnalysisResult.KIND_CHOICES` and pins the three non-trivial values), and
+re-ran the four pre-existing Stage 9 tests that exercise this exact gating logic
+(`test_weed_mapping_skipped_for_satellite_capture`,
+`test_canopy_flagged_low_resolution_proxy_for_satellite`, `test_report_includes_capture_source`,
+`test_run_analysis_orchestration`) to confirm zero behavior change. `./webodm.sh test backend agri.tests`
+in `--dev` mode: 101/103 — same two pre-existing, unrelated failures as every prior run this session
+(confirmed identical error signatures a fourth time — zero new regressions across four consecutive
+full-suite runs now).
+
+**Not done:** Phases 4–6 of the roadmap (broader Sentinel indices, observation timeline, historical
+baselines).
 

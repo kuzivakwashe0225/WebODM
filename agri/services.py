@@ -27,6 +27,23 @@ from agri.analysis.report import build_report
 # analyses that assume drone resolution are not meaningful (or are actively
 # misleading) when run against satellite imagery. See
 # precise-agric/stages/stage-9-satellite-monitoring.md §4.
+#
+# Per-service satellite eligibility, keyed by AnalysisResult.kind. True = runs
+# unmodified; 'proxy' = runs but flagged low_resolution_proxy in its stats;
+# False = skipped entirely, replaced with a stats={'skipped': True, 'reason': ...}
+# placeholder. Consolidated here (Stage 10 Phase 3) instead of inline
+# `if satellite:` branches so a third gating case doesn't need a new pattern.
+SATELLITE_ELIGIBLE = {
+    AnalysisResult.PLANT_HEALTH: True,
+    AnalysisResult.RGB_INDEX: True,
+    AnalysisResult.GRID: True,
+    AnalysisResult.CANOPY: 'proxy',
+    AnalysisResult.WEED: False,
+    AnalysisResult.REPORT: True,
+}
+
+WEED_SATELLITE_SKIP_REASON = ('Weed detection needs drone-resolution imagery; not run for '
+                              'satellite captures (satellite pixels are ~100 m^2 each).')
 
 
 def _is_satellite(task):
@@ -70,7 +87,7 @@ def execute_analysis(run):
         # soil, so the percentage is a coarse proxy, not a measurement. Flag it
         # rather than silently presenting it as equivalent to drone-derived cover.
         _, canopy_stats = compute_canopy_cover(task, run.boundary, path("canopy.tif"))
-        if satellite:
+        if satellite and SATELLITE_ELIGIBLE[AnalysisResult.CANOPY] == 'proxy':
             canopy_stats['low_resolution_proxy'] = True
         AnalysisResult.objects.create(run=run, kind=AnalysisResult.CANOPY,
                                       asset_path=rel("canopy.tif"), stats=canopy_stats)
@@ -81,10 +98,8 @@ def execute_analysis(run):
         # a weed count. That fabricated number would reach farmers via the
         # AgriTrack push, so it's gated off rather than left to run.
         # See precise-agric/stages/stage-9-satellite-monitoring.md §4.
-        if satellite:
-            weed_stats = {'skipped': True,
-                         'reason': 'Weed detection needs drone-resolution imagery; not run for '
-                                   'satellite captures (satellite pixels are ~100 m^2 each).'}
+        if satellite and not SATELLITE_ELIGIBLE[AnalysisResult.WEED]:
+            weed_stats = {'skipped': True, 'reason': WEED_SATELLITE_SKIP_REASON}
             AnalysisResult.objects.create(run=run, kind=AnalysisResult.WEED,
                                           asset_path='', stats=weed_stats)
         else:

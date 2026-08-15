@@ -1,11 +1,12 @@
 # Stage 10 — Sentinel Integration Roadmap (post Stage 9 audit)
 
-> **Status (2026-08-15): Phases 1–2 built and test-verified.** `TestSatellitePull` grew from 13 → 24 → 30
-> tests across both phases; full `agri.tests` re-run after each: 94/96, then 100/102 — the two failures
+> **Status (2026-08-15): Phases 1–3 built and test-verified.** `TestSatellitePull` grew from 13 → 24 → 30
+> tests across both phases; Phase 3 added 1 test to `TestAgri` instead (pure refactor, no client surface).
+> Full `agri.tests` re-run after each phase: 94/96, then 100/102, then 101/103 — the two failures
 > throughout are the same pre-existing, unrelated-to-this-work issues already documented in stage-9 §13
-> (confirmed identical error signatures each time, never new regressions). Three real bugs were found
+> (confirmed identical error signatures every time, never new regressions). Three real bugs were found
 > live-testing Phase 1's cloud-masking approach against the real Sentinel Hub API *before* they became
-> silent data-quality bugs — see §3 Phase 1. Phases 3–6 are still plan-only; each gets its own
+> silent data-quality bugs — see §3 Phase 1. Phases 4–6 are still plan-only; each gets its own
 > implementation pass.
 
 ## 1. Why this document exists
@@ -207,29 +208,44 @@ browser-tested — same gap flagged for the rest of the Stage 9/10 frontend.
 **Depends on:** nothing from Phase 1 functionally, but naturally follows it since both touch the same
 client module and the same modal.
 
-### Phase 3 — Capability-table cleanup
+### Phase 3 — Capability-table cleanup — ✅ BUILT (2026-08-15)
 
 **Why:** today's satellite gating is two hardcoded `if satellite:` branches in `agri/services.py` (weed
 off, canopy flagged). Fine at two cases; worth formalizing *before* it grows to five ad-hoc branches.
 
-**What:** a plain constant dict in `agri/services.py` — not a self-reporting plugin system, six fixed
-services don't need one:
+**What was built:** a plain constant dict in `agri/services.py`, keyed by the real `AnalysisResult.kind`
+constants rather than bare strings (so a typo or a renamed kind fails loudly, not silently) — not a
+self-reporting plugin system, six fixed services don't need one:
 
 ```python
 SATELLITE_ELIGIBLE = {
-    'plant_health': True,
-    'rgb_index': True,
-    'grid': True,
-    'canopy': 'proxy',
-    'weed': False,
-    'report': True,
+    AnalysisResult.PLANT_HEALTH: True,
+    AnalysisResult.RGB_INDEX: True,
+    AnalysisResult.GRID: True,
+    AnalysisResult.CANOPY: 'proxy',
+    AnalysisResult.WEED: False,
+    AnalysisResult.REPORT: True,
 }
 ```
 
-`execute_analysis()` consults the table instead of inline branches. **No behavior change** — a refactor
-of the existing two decisions, not a new one.
+`execute_analysis()`'s two inline `if satellite:` branches now read `SATELLITE_ELIGIBLE[...]` instead of
+hardcoding the decision a second time. **No behavior change**, confirmed by the pre-existing Stage 9
+tests (`test_weed_mapping_skipped_for_satellite_capture`,
+`test_canopy_flagged_low_resolution_proxy_for_satellite`, `test_report_includes_capture_source`,
+`test_run_analysis_orchestration`) passing unmodified — this was a refactor of the existing two decisions,
+not a new one.
 
-**Files:** `agri/services.py`.
+**New test:** `test_satellite_eligible_table_covers_all_analysis_kinds` — asserts the table's keys exactly
+match `AnalysisResult.KIND_CHOICES` (so adding a 7th analysis service without an entry here fails a test,
+not silently falls through) and pins the three non-trivial values (`WEED: False`, `CANOPY: 'proxy'`, the
+rest `True`).
+
+**Files touched:** `agri/services.py`, `agri/tests.py` (1 new test, `TestAgri` — this phase didn't touch
+`TestSatellitePull`, since nothing here is Sentinel-client-specific).
+
+**Verification:** no live API surface involved (pure in-process refactor), so no standalone
+live-verification script needed this time — same judgment call as Stage 9's non-network code. Real
+`./webodm.sh test backend agri.tests` run in `--dev` mode confirmed no regressions.
 
 ### Phase 4 — Broaden Sentinel's own indices beyond NDVI
 

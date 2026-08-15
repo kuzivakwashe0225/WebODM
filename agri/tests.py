@@ -333,6 +333,20 @@ class TestAgri(BootTestCase):
         report = run.results.get(kind=AnalysisResult.REPORT)
         self.assertEqual(report.stats["summary"]["capture_source"], CaptureMeta.SATELLITE)
 
+    # ---- Stage 10 Phase 3: satellite eligibility table ----
+
+    def test_satellite_eligible_table_covers_all_analysis_kinds(self):
+        from agri.services import SATELLITE_ELIGIBLE
+        from agri.models import AnalysisResult
+
+        all_kinds = {kind for kind, _label in AnalysisResult.KIND_CHOICES}
+        self.assertEqual(set(SATELLITE_ELIGIBLE.keys()), all_kinds)
+        self.assertEqual(SATELLITE_ELIGIBLE[AnalysisResult.WEED], False)
+        self.assertEqual(SATELLITE_ELIGIBLE[AnalysisResult.CANOPY], 'proxy')
+        for kind in (AnalysisResult.PLANT_HEALTH, AnalysisResult.RGB_INDEX,
+                     AnalysisResult.GRID, AnalysisResult.REPORT):
+            self.assertEqual(SATELLITE_ELIGIBLE[kind], True)
+
     def test_analysis_trigger_requires_approved_boundary(self):
         from agri.models import AnalysisRun
 

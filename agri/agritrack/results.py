@@ -16,6 +16,7 @@ import logging
 import requests
 
 from webodm import settings
+from app.models import Task
 from agri.models import AnalysisResult
 
 logger = logging.getLogger('app.logger')
@@ -46,6 +47,25 @@ EXG_SCALE_MAX = 60.0
 # normalized by AgriTrack: good, fair, poor") rather than the full 4-tier
 # healthy/moderate/stressed/critical scale used elsewhere in their contract.
 GOOD, FAIR, POOR = 'good', 'fair', 'poor'
+
+
+def resolve_agri_field(boundary):
+    """
+    The AgriField (external AgriTrack field) an AnalysisRun's boundary maps to.
+
+    Prefers the boundary's direct link (boundary.agri_field), but falls back to
+    the persistent agri.Field's link (boundary.field.agri_field). Both seeding
+    (agri/capture.py) and inbound sync (agri/agritrack/sync.py) set Field.agri_field,
+    so a boundary that was hand-drawn or cloned before its direct agri_field link
+    was attached is still resolvable this way. Returns None if neither is set
+    (nothing valid to push to AgriTrack).
+    """
+    if boundary.agri_field_id is not None:
+        return boundary.agri_field
+    field = boundary.field
+    if field is not None and field.agri_field_id is not None:
+        return field.agri_field
+    return None
 
 
 def _clamp01(x):
@@ -107,10 +127,18 @@ def _summary_to_text(summary):
 def build_orthophoto_result_payload(run):
     """
     Builds the payload for AgriTrack's live POST /orthophoto/analysis/push,
-    per the confirmed-current contract (field_id, farm_id, analysis_date,
-    scope, VARI/canopy/weed metrics, output URLs, summary/recommendations).
+    per the confirmed-current contract: a camelCase envelope
+    (sourceSystem/farmId/fieldId/subPlotId/scope/analysisDate/extId) wrapping
+    the VARI/canopy/weed metrics, output URLs, and an `interpretation` block
+    (summary + recommendations).
+
+    subPlotId/scope: this pipeline analyses whole fields -- there is no
+    sub-plot entity in the data model -- so subPlotId is null and scope is
+    "field". Left explicit so AgriTrack can distinguish a field-level run from
+    a (future) sub-plot one.
     """
-    agri_field = run.boundary.agri_field
+    agri_field = resolve_agri_field(run.boundary)
+    task = run.task
     results = {r.kind: r for r in run.results.all()}
 
     metrics = {}
@@ -148,10 +176,14 @@ def build_orthophoto_result_payload(run):
     # height_mean_m, height_max_m, uniformity_pct, stress_zone_pct, healthy_zone_pct.
 
     outputs = {}
-    task = run.task
+    # The source orthophoto the whole run was derived from.
+    ortho_url = _build_asset_url(task, Task.ASSETS_MAP['orthophoto.tif'])
+    if ortho_url:
+        outputs['orthophoto_url'] = ortho_url
     for kind, url_key in ((AnalysisResult.PLANT_HEALTH, 'heatmap_url'),
                           (AnalysisResult.RGB_INDEX, 'index_map_url'),
-                          (AnalysisResult.WEED, 'weed_map_url')):
+                          (AnalysisResult.WEED, 'weed_map_url'),
+                          (AnalysisResult.REPORT, 'comparison_url')):
         r = results.get(kind)
         if r and r.asset_path:
             outputs[url_key] = _build_asset_url(task, r.asset_path)
@@ -161,15 +193,19 @@ def build_orthophoto_result_payload(run):
     recommendations = (report.stats.get('recommendations') if report else None) or []
 
     return {
-        'field_id': agri_field.agritrack_field_id,
-        'farm_id': agri_field.farm.agritrack_farm_id,
-        'analysis_date': run.completed_at.date().isoformat() if run.completed_at else None,
+        'sourceSystem': 'orthophoto',
+        'farmId': agri_field.farm.agritrack_farm_id,
+        'fieldId': agri_field.agritrack_field_id,
+        'subPlotId': None,
         'scope': 'field',
+        'analysisDate': run.completed_at.date().isoformat() if run.completed_at else None,
+        'extId': 'webodm-run-%s' % run.id,
         'metrics': metrics,
         'outputs': outputs,
-        'summary': _summary_to_text(summary),
-        'recommendations': recommendations,
-        'ext_id': 'webodm-run-%s' % run.id,
+        'interpretation': {
+            'summary': _summary_to_text(summary),
+            'recommendations': recommendations,
+        },
     }
 
 
@@ -187,7 +223,7 @@ def push_orthophoto_results(run, timeout=10):
     No-op (returns False) if not configured or the boundary has no synced
     AgriField (nothing valid to report -- see module docstring).
     """
-    if run.boundary.agri_field_id is None:
+    if resolve_agri_field(run.boundary) is None:
         logger.info("AnalysisRun %s has no linked AgriField; skipping AgriTrack results push" % run.id)
         return False
 

@@ -134,16 +134,25 @@ class ReuseBoundariesView(APIView):
 
 class FieldListView(APIView):
     """
-    List the persistent Fields of a capture's farm (for the boundary-save Field
-    picker / autocomplete). GET /api/agri/fields/?task=<task_id>.
+    List the persistent Fields of a farm (for the boundary-save Field
+    picker/autocomplete, and the "Get Satellite Imagery" field target picker --
+    stage-10-sentinel-roadmap.md Phase 1). Accepts EITHER:
+      GET /api/agri/fields/?task=<task_id>     (a capture already exists)
+      GET /api/agri/fields/?project=<project_id>  (no capture yet, e.g. the
+                                                   Import-menu satellite modal)
     """
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         from .serializers import FieldSerializer
         task_id = request.query_params.get('task')
-        task = get_object_or_404(Task, pk=task_id)
-        fields = Field.objects.filter(project_id=task.project_id)
+        project_id = request.query_params.get('project')
+        if task_id:
+            task = get_object_or_404(Task, pk=task_id)
+            project_id = task.project_id
+        elif not project_id:
+            raise exceptions.ValidationError(detail="task or project is required")
+        fields = Field.objects.filter(project_id=project_id)
         return Response(FieldSerializer(fields, many=True).data)
 
 

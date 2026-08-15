@@ -5,13 +5,21 @@ persistent Field and the capture's acquisition date.
 
 x-axis = CaptureMeta.capture_date (fallback: task.created_at date).
 Series values come straight from the stats already stored on AnalysisResult.
+
+Points are additionally tagged with `source` (drone/satellite, from the
+capture) and `computed_by` (webodm/sentinel, from the run) and keyed by
+(date, source, computed_by) rather than by date alone -- a drone and a
+satellite capture on the same date, or our own vs Sentinel's own numbers for
+the same date, are never comparable (different pixel sizes, possibly
+different formulas) and must never silently overwrite or average into each
+other. See precise-agric/stages/stage-9-satellite-monitoring.md §5 / §9.
 """
 from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from app.api.common import get_and_check_project
-from agri.models import AnalysisRun, AnalysisResult
+from agri.models import AnalysisRun, AnalysisResult, CaptureMeta
 
 # Runs whose fan-out has completed (results are populated).
 FINISHED_STATUSES = (AnalysisRun.PENDING_REVIEW, AnalysisRun.APPROVED)
@@ -26,6 +34,13 @@ def _capture_date(task):
     if cm is not None:
         return cm.capture_date
     return task.created_at.date()
+
+
+def _capture_source(task):
+    cm = getattr(task, 'capture_meta', None)
+    # No CaptureMeta row means a raw multi-image flight processed by NodeODM --
+    # every such Task in this system is, by construction, a drone flight.
+    return getattr(cm, 'source', CaptureMeta.DRONE)
 
 
 def _run_metrics(run):
@@ -79,28 +94,39 @@ class SeasonalView(APIView):
                 .prefetch_related('results')
                 .order_by('created_at'))
 
-        # field id -> {name, points: {date -> metric dict}}; later runs on the
-        # same date overwrite earlier ones (one point per field per date).
+        # field id -> {name, points: {(date, source, computed_by) -> metric dict}}.
+        # Keying on the triple (not just date) means a same-day drone + satellite
+        # capture, or our own vs Sentinel's own numbers for the same date, each
+        # keep their own point instead of one silently overwriting the other.
         fields = {}
         for run in runs:
             field = run.boundary.field
             entry = fields.setdefault(field.id, {'name': field.name, 'points': {}})
             date_str = _capture_date(run.task).isoformat()
-            point = {'date': date_str}
+            source = _capture_source(run.task)
+            computed_by = run.computed_by
+            point = {'date': date_str, 'source': source, 'computed_by': computed_by}
             point.update(_run_metrics(run))
-            entry['points'][date_str] = point
+            entry['points'][(date_str, source, computed_by)] = point
 
         field_list = []
-        farm_points_by_date = {}
+        farm_points_by_key = {}
         for field_id, entry in fields.items():
-            series = [entry['points'][d] for d in sorted(entry['points'])]
+            series = [entry['points'][k] for k in
+                     sorted(entry['points'], key=lambda k: (k[0], k[1], k[2]))]
             field_list.append({'id': field_id, 'name': entry['name'], 'series': series})
             for point in series:
-                farm_points_by_date.setdefault(point['date'], []).append(point)
+                key = (point['date'], point['source'], point['computed_by'])
+                farm_points_by_key.setdefault(key, []).append(point)
 
+        # Farm-level average is computed WITHIN each (date, source, computed_by)
+        # group only -- never blending drone with satellite, or our numbers with
+        # Sentinel's, into one misleading average.
         farm_series = []
-        for date_str in sorted(farm_points_by_date):
-            farm_series.append({'date': date_str, **_average(farm_points_by_date[date_str])})
+        for key in sorted(farm_points_by_key):
+            date_str, source, computed_by = key
+            farm_series.append({'date': date_str, 'source': source, 'computed_by': computed_by,
+                               **_average(farm_points_by_key[key])})
 
         field_list.sort(key=lambda f: f['name'])
         return Response({

@@ -26,7 +26,11 @@ def compute_grid_analysis(task, boundary, output_path, cell_size_m=10.0):
         crs = ds.crs
 
     px = abs(transform.a) or 1.0
-    cell_px = max(1, int(round(cell_size_m / px)))
+    # A floor of 3px means each zone averages at least 9 pixels rather than
+    # degenerating to a single raw (and possibly noisy) pixel -- this matters for
+    # coarse imagery where the requested cell_size_m can be close to the pixel
+    # size itself (e.g. Sentinel's 10m pixels vs a 10m cell_size_m default).
+    cell_px = max(3, int(round(cell_size_m / px)))
 
     H, W = arr.shape
     features = []

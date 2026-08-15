@@ -30,7 +30,7 @@ they're all resolved now, but **read this before touching the stack**.
    marker `/webodm/venv/.devenv_done` on that persistent volume — it runs **once**, then is skipped.
    Force a redo with `rm /webodm/venv/.devenv_done` or `WO_FORCE_DEVENV=YES`. `webpack --watch` still
    runs every boot (it's the live-reload watcher).
-3. `app/plugins/functions.py` + `docker-compose.dev.yml`: `WO_SKIP_PLUGIN_REBUILD=YES` makes
+3. `app/plugins/functions.py` + `docker-              compose.dev.yml`: `WO_SKIP_PLUGIN_REBUILD=YES` makes
    `boot()` trust existing plugin builds instead of rebuilding all plugin JSX every boot (the mtime
    check is unreliable over the Windows bind mount). Only plugins with **no** build output are built.
 

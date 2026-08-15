@@ -413,3 +413,135 @@ untracking it. Noted for future sessions: **never stage this file broadly.**
 
 Stack restarted (`./webodm.sh restart`) to pick up the new environment variables — a code reload
 alone doesn't apply new container env vars, only a recreate does.
+
+---
+
+## Stage 9 — Sentinel satellite monitoring (2026-07-10 to 2026-08-06) ✅ Stage A/F/G
+
+Full design in [stages/stage-9-satellite-monitoring.md](stages/stage-9-satellite-monitoring.md). Summary
+of what happened, in order:
+
+**Planning.** Satellite imagery reframed as a *scout* (whole-field/farm trend + anomaly triage), not a
+drone replacement — resolution alone (10 m/px vs a drone's few cm) rules out per-field weed mapping and
+makes small fields (down to a real 0.1 ha) unreliable for precise per-field numbers. Found and fixed a
+real would-be bug before writing any code: `CaptureMeta` had no `source` field, so a same-day drone +
+satellite capture would have silently overwritten each other in the seasonal graphs and blended into one
+misleading farm average.
+
+**Stage A (data model).** `CaptureMeta.source` (DRONE/SATELLITE) and `AnalysisRun.computed_by`
+(WEBODM/SENTINEL) added (migration `0005`). Seasonal API now keys points by `(date, source, computed_by)`
+instead of date alone. Weed detection gated off and canopy flagged as a low-resolution proxy for
+satellite captures. `grid.py` given a 3px cell-size floor (general correctness fix).
+
+**Architecture pivot.** Originally assumed a separate external "remote-sense" partner team/system (their
+own reflectance pipeline, their own endpoints). User clarified: **no such system exists** — this app
+connects directly to the real Sentinel data source, Copernicus Data Space Ecosystem (CDSE) / Sentinel
+Hub. Looked up CDSE's actual current docs (not trained-in knowledge, given risk of staleness) before
+writing `agri/remote_sense/sentinel_client.py` against their documented Process API (imagery) and
+Statistical API (their own pre-computed NDVI — this **is** "Sentinel's own analysis engine," not a custom
+partner pipeline).
+
+**Live-verified against a real account.** User created a free CDSE account + OAuth credentials.
+Live-tested both APIs against a real AOI (Norton, Zimbabwe) — both succeeded with plausible data (13 real
+NDVI points, a real 4-band reflectance image). Found and fixed one real bug in the process:
+`DataCollection.SENTINEL2_L2A`'s built-in `service_url` silently overrides `config.sh_base_url` and
+routes every request to the wrong (classic Sentinel Hub, not CDSE) host — 401s despite config matching
+Sentinel Hub's own documented setup exactly. Fixed via `DataCollection.SENTINEL2_L2A.define_from(...)`,
+matching CDSE's own example notebooks.
+
+**Stages F/G (the "Get from Sentinel" flow).** Fully rebranded — no "Sentinel"/"Copernicus" anywhere in
+the UI, labelled "Satellite Imagery" / "Satellite Reference" throughout, per explicit instruction.
+`agri/remote_sense/sentinel_pull.py` (AOI resolution straight from AgriTrack onboarding — user only picks
+a date range), two Celery tasks, two endpoints (`POST .../satellite/imagery/`, `.../compare/`), a
+farm-level date-range picker in the Season Progress page, and a per-boundary "Compare with Satellite"
+action in the map panel showing both engines' numbers side by side (no auto-reconciliation — the
+agronomist decides, per explicit instruction).
+
+**Verification, honestly.** `TestSatellitePull` (13 tests, network mocked) written and run for real.
+First real run hit `./webodm.sh start` (no `--dev`) pointing at a stale image that **predated the entire
+`agri` app** — `./coreplugins` is the only thing live-mounted without `--dev`; everything else is baked
+into the image. Restarted with `--dev`. First test run then found two more real bugs: a stray leftover
+line in an unrelated test (from an earlier edit) causing a `NameError`, and the new Celery tasks not
+following this codebase's own `TestSafeAsyncResult.set(...)` pattern for making eager-mode task results
+pollable via `/api/workers/check/` under `CELERY_TASK_ALWAYS_EAGER` — both fixed. Final full
+`agri.tests` run: **84/85 pass**; the one remaining failure
+(`test_resolve_agri_field_falls_back_to_persistent_field_link`) is a **pre-existing bug unrelated to this
+work** (confirmed by running it in isolation, and by reading `_agri_linked_run`: AgriTrack sync already
+auto-creates the persistent `Field` link for a synced `AgriField`, so the test's own manual
+`Field.objects.create(..., agri_field=agri_field)` collides with it) — not touched or introduced by this
+session.
+
+**Not done:** the frontend (season.html date picker, PreciseAgricPanel.jsx comparison UI) is implemented
+but **not exercised in an actual browser** — reasoned through against existing conventions only. Cloud
+masking, historical baselines, retention policy, and the pre-existing AgriField bug above remain open.
+
+---
+
+## Stage 10 — Sentinel roadmap + Phases 1–2 (2026-08-14 to 2026-08-15) 🚧 Phases 1–2 done
+
+**Roadmap.** User pasted an externally-drafted architecture review (not written against this codebase)
+proposing a "multi-source observation platform" direction. Reviewed it skeptically against the actual
+code rather than taking it at face value: its headline direction was already how Stage 9 was built, but
+three concrete recommendations didn't survive contact with the real schema (renaming `computed_by` when
+it + `AnalysisResult.kind` already do that job; a new `SatelliteAnalysis` model when `AnalysisResult.stats`
+already is a flexible JSONField; gating `plant_counting`/`plant_height` for satellite when neither exists
+anywhere in `agri/analysis/` — confirmed via `Glob` + reading `agri/services.py` directly, not assumed).
+What *did* hold up — cloud masking, a scene-availability picker — anchored a six-phase roadmap, written
+to [stage-10-sentinel-roadmap.md](stages/stage-10-sentinel-roadmap.md) via formal plan mode (user
+approved before any code was touched). Locked: full roadmap this pass, code later, one phase at a time;
+cloudy pulls are flagged, not blocked.
+
+**UX pass.** Before writing roadmap code, mocked the actual screens (published as an Artifact) showing
+how satellite fits into the existing app: an Import-menu entry point (not buried on the trends page), a
+quality badge on the existing "Compare with Satellite" card, and a field-level observation timeline
+concept. User confirmed: satellite pulls should support **both** whole-farm and single-field targeting.
+
+**Phase 1 implementation, TDD, one phase at a time as agreed.** Before writing the cloud-masking
+evalscript, live-verified the approach against the real Sentinel Hub API rather than trusting
+documentation (which was itself inconclusive on the exact question) — same discipline that caught the
+`DataCollection` bug in Stage 9. Found and fixed **three more real bugs** this way, all *before* they
+could ship as silent data-quality bugs: SCL only accepts `units:"DN"` (rejected outright alongside
+`REFLECTANCE`-unit bands — confirmed via a live 400 response); a hand-rolled DN→reflectance formula
+tested side-by-side against real server-computed reflectance and found systematically wrong by a flat
+0.1 (the assumed `BOA_ADD_OFFSET` doesn't match what the endpoint actually does — lesson: never replicate
+Sentinel Hub's reflectance conversion locally); and a single-band Process API response shape (2D, not 3D)
+that raised a real `IndexError` the first time the integrated code actually ran.
+
+Built: `valid_pixel_pct` (SCL-derived quality %) on both the imagery-pull and comparison paths, stored on
+`CaptureMeta` (migration `0006`) and passed through into `AnalysisResult.stats`; single-field targeting
+for satellite pulls (`_field_geometry()`, mirroring the existing farm-level fallback); a quality badge in
+`PreciseAgricPanel.jsx`; a new "Get Satellite Imagery" entry in the project's Import dropdown
+(`main.js`) — same slot as "Upload Orthophoto" — replacing the Season Progress page as the only way in.
+
+**Verified for real:** `TestSatellitePull` grew from 13 to 24 tests (including a pure-function test for
+the SCL classification logic — no mocking, no network). `./webodm.sh test backend agri.tests` in `--dev`
+mode: `TestSatellitePull` 24/24, full suite 94/96 — the two failures are the exact same pre-existing,
+unrelated issues from Stage 9 (confirmed identical error signatures, not new regressions).
+
+**Not done (at Phase 1 checkpoint):** Phases 2–6 of the roadmap (scene picker, capability-table cleanup,
+broader Sentinel indices, observation timeline, historical baselines). `main.js`'s new modal is not
+browser-tested, same gap already flagged for the rest of the frontend.
+
+**Phase 2 implementation, same discipline.** Before writing the endpoint, live-verified
+`SentinelHubCatalog` against the real CDSE account — specifically that it combines correctly with the
+CDSE-redefined `DataCollection` that caused stage-9's service-URL bug — rather than assuming the fix from
+that earlier bug still held for a different Sentinel Hub API surface. No new bug turned up this time, but
+the check was worth doing anyway: same class of API, same historical footgun.
+
+Built: `search_available_scenes(geom, date_from, date_to)` in `sentinel_client.py` using the Catalog API,
+with a pure `_dedupe_scenes_by_date()` helper (collapses same-day results to the least-cloudy scene,
+newest-first — unit-tested with no mocking, no network); a new read-only
+`GET /api/agri/satellite/availability/` endpoint (`agri/api/satellite.py`) supporting the same
+farm-vs-field targeting as the Phase 1 pull endpoint; and an "Available scenes" list in `main.js`'s
+existing "Get Satellite Imagery" modal, auto-populated on date/field change, with an "Auto" default and
+per-scene rows that narrow the pull to one exact date when clicked.
+
+**Verified for real:** `TestSatellitePull` grew from 24 to 30 tests. `./webodm.sh test backend agri.tests`
+in `--dev` mode: `TestSatellitePull` 30/30, full suite 100/102 — same two pre-existing, unrelated failures
+as every prior run this session (confirmed identical error signatures again — zero new regressions across
+three consecutive full-suite runs now).
+
+**Not done:** Phases 3–6 of the roadmap (capability-table cleanup, broader Sentinel indices, observation
+timeline, historical baselines). `main.js`'s scene-list addition is not browser-tested, same gap as
+Phase 1.
+

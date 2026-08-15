@@ -49,6 +49,18 @@
     </select>
   </div>
 
+  <div class="pa-controls" id="pa-sat-pull" style="display:none;">
+    <label for="pa-sat-from" style="margin:0;"><i class="fa fa-satellite"></i> {% trans "Satellite imagery" %}:</label>
+    <label for="pa-sat-from" style="margin:0; font-weight:normal;">{% trans "From" %}</label>
+    <input type="date" id="pa-sat-from" class="form-control" style="width:auto;">
+    <label for="pa-sat-to" style="margin:0; font-weight:normal;">{% trans "To" %}</label>
+    <input type="date" id="pa-sat-to" class="form-control" style="width:auto;">
+    <button id="pa-sat-btn" class="btn btn-sm" style="background:#1565c0; color:#fff;" onclick="paRequestSatelliteImagery()">
+      <i class="fa fa-cloud-download-alt"></i> {% trans "Get Satellite Imagery" %}
+    </button>
+  </div>
+  <div id="pa-sat-status" class="pa-msg" style="display:none; padding:8px 0;"></div>
+
   <div id="pa-summary" class="pa-summary" style="display:none;"></div>
   <div id="pa-empty" class="pa-msg" style="display:none;"></div>
   <div id="pa-cards" class="pa-cards" style="display:none;"></div>
@@ -203,12 +215,79 @@
         projects.forEach(function(p){
           var o=document.createElement('option'); o.value=p.id; o.textContent=p.name; sel.appendChild(o);
         });
-        sel.onchange=function(){ loadSeasonal(sel.value); };
+        sel.onchange=function(){ loadSeasonal(sel.value); updateSatPullVisibility(); };
         if (projects.length===1){ sel.value=projects[0].id; loadSeasonal(projects[0].id); }
+        updateSatPullVisibility();
       })
       .catch(function(){ sel.innerHTML='<option value="">{% trans "Could not load farms" %}</option>'; });
   }
 
+  // --- On-demand satellite imagery pull -----------------------------------
+  // The user only ever picks a date range: the area comes straight from this
+  // farm's own onboarded boundary (agri/remote_sense/sentinel_pull.py), so
+  // there is nothing else to configure here.
+
+  function fmtDate(d){ return d.toISOString().slice(0,10); }
+
+  function setDefaultSatDates(){
+    var to = new Date();
+    var from = new Date(); from.setDate(from.getDate() - 30);
+    document.getElementById('pa-sat-from').value = fmtDate(from);
+    document.getElementById('pa-sat-to').value = fmtDate(to);
+  }
+
+  function updateSatPullVisibility(){
+    var pid = document.getElementById('pa-farm').value;
+    var pull = document.getElementById('pa-sat-pull');
+    pull.style.display = pid ? 'flex' : 'none';
+  }
+
+  function pollSatelliteTask(celeryTaskId, onDone){
+    jQuery.ajax({type:'GET', url:'/api/workers/check/'+celeryTaskId}).done(function(result){
+      if (result.error){ onDone(result.error); }
+      else if (result.ready){ onDone(null); }
+      else { setTimeout(function(){ pollSatelliteTask(celeryTaskId, onDone); }, 3000); }
+    }).fail(function(){ setTimeout(function(){ pollSatelliteTask(celeryTaskId, onDone); }, 3000); });
+  }
+
+  window.paRequestSatelliteImagery = function(){
+    var pid = document.getElementById('pa-farm').value;
+    var from = document.getElementById('pa-sat-from').value;
+    var to = document.getElementById('pa-sat-to').value;
+    var btn = document.getElementById('pa-sat-btn');
+    var statusEl = document.getElementById('pa-sat-status');
+    if (!pid || !from || !to) return;
+    if (from > to){
+      statusEl.style.display='block';
+      statusEl.innerHTML = '⚠️ {% trans "The start date must be before the end date." %}';
+      return;
+    }
+
+    btn.disabled = true;
+    statusEl.style.display = 'block';
+    statusEl.innerHTML = '<i class="fa fa-circle-notch fa-spin"></i> ' +
+      '{% trans "Requesting satellite imagery for this farm… this can take a minute." %}';
+
+    jQuery.ajax({
+      type: 'POST', url: '/api/agri/satellite/imagery/', contentType: 'application/json',
+      data: JSON.stringify({project: pid, date_from: from, date_to: to})
+    }).done(function(res){
+      pollSatelliteTask(res.celery_task_id, function(err){
+        btn.disabled = false;
+        if (err){
+          statusEl.innerHTML = '⚠️ ' + err;
+        }else{
+          statusEl.innerHTML = '✅ {% trans "Satellite imagery added to this farm. Open its map view to review and approve the field boundary, then run analysis." %}';
+        }
+      });
+    }).fail(function(xhr){
+      btn.disabled = false;
+      var detail = (xhr.responseJSON && xhr.responseJSON.detail) || xhr.statusText;
+      statusEl.innerHTML = '⚠️ ' + detail;
+    });
+  };
+
+  setDefaultSatDates();
   loadFarms();
 })();
 </script>

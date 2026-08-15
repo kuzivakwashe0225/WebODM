@@ -27,7 +27,7 @@ from worker import tasks as worker_tasks
 
 
 def create_capture_from_orthophoto(project, orthophoto, name="Imported Capture",
-                                   dispatch=True, capture_date=None):
+                                   dispatch=True, capture_date=None, source=None):
     """
     :param project: app.models.Project the capture belongs to (a Farm)
     :param orthophoto: filesystem path (str) or an uploaded file-like object
@@ -37,6 +37,12 @@ def create_capture_from_orthophoto(project, orthophoto, name="Imported Capture",
                      dispatch=False and drive worker.tasks.process_task directly.
     :param capture_date: acquisition date (datetime.date). Defaults to today --
                          the x-axis of the seasonal-progress graphs.
+    :param source: CaptureMeta.DRONE (default) or CaptureMeta.SATELLITE -- see
+                   precise-agric/stages/stage-9-satellite-monitoring.md §5. Callers
+                   importing Sentinel imagery (agri/remote_sense/ingest.py) pass
+                   SATELLITE explicitly; every other caller keeps today's DRONE
+                   default (manual single-.tif uploads have always meant "a
+                   capture", most commonly a drone ortho).
     :return: the created Task (a Capture), still RUNNING until processed.
     """
     with transaction.atomic():
@@ -49,7 +55,8 @@ def create_capture_from_orthophoto(project, orthophoto, name="Imported Capture",
         task.create_task_directories()
 
         CaptureMeta.objects.create(task=task,
-                                   capture_date=capture_date or timezone.now().date())
+                                   capture_date=capture_date or timezone.now().date(),
+                                   source=source or CaptureMeta.DRONE)
 
         dst = task.assets_path(Task.ASSETS_MAP["orthophoto.tif"])
         os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -118,9 +125,12 @@ def clone_farm_fields_to_capture(task):
             src.save(update_fields=['field'])
         # Carry the AgriTrack link forward too, so every capture's analysis (not
         # just the first) is pushable back to AgriTrack per-field (results.py keys
-        # the outbound push off boundary.agri_field).
+        # the outbound push off boundary.agri_field). Fall back to the persistent
+        # Field's link when the source boundary itself was never directly linked
+        # (e.g. hand-drawn against a synced Field), so the null doesn't propagate.
+        agri_field = src.agri_field or (field.agri_field if field else None)
         created.append(Boundary.objects.create(
-            task=task, field=field, agri_field=src.agri_field, name=src.name,
+            task=task, field=field, agri_field=agri_field, name=src.name,
             geom=src.geom, status=Boundary.DRAFT))
     return created
 

@@ -398,19 +398,30 @@ AGRITRACK_OUTBOUND_API_KEY = os.environ.get('WO_AGRITRACK_OUTBOUND_API_KEY') or 
 #   server has no way to reach us on localhost).
 AGRITRACK_PUBLIC_BASE_URL = os.environ.get('WO_AGRITRACK_PUBLIC_BASE_URL') or None
 
-# Remote-sense (Sentinel) integration: an external system pushes a georeferenced
-# GeoTIFF tagged with an AgriTrack farm id; we import it as a Capture on that
-# farm's Project and seed its fields from the synced AgriFields (see
-# agri/remote_sense/). Distinct key from AgriTrack's so it can be rotated on its
-# own and a leak of one doesn't compromise the other.
-# - shared secret the remote-sense system must send as X-Api-Key on POST
-#   /api/v1/remote-sense/push. None means the endpoint rejects everything.
+# Remote-sense (Sentinel) manual import: POST /api/v1/remote-sense/push accepts a
+# georeferenced GeoTIFF (or separate band files) tagged with an AgriTrack farm id
+# and imports it as a Capture (see agri/remote_sense/). Originally designed for an
+# external pusher; that external system no longer exists, but the endpoint still
+# works as a manual-upload fallback (e.g. a staff member who downloaded a scene by
+# hand). The PRIMARY path going forward is this server pulling directly from
+# Sentinel -- see SENTINEL_CLIENT_ID below.
+# - shared secret a caller must send as X-Api-Key on POST /api/v1/remote-sense/push.
+#   None means the endpoint rejects everything.
 REMOTE_SENSE_INBOUND_API_KEY = os.environ.get('WO_REMOTE_SENSE_INBOUND_API_KEY') or None
-# - base URL of the remote-sense system, used ONLY for the optional pull mode
-#   (POST {farm_id, image_url}): we fetch image_url and require it to live under
-#   this base (SSRF guard), sending the key above as X-Api-Key. None disables
-#   pull mode entirely (push-a-file mode still works).
+# - base URL for the endpoint's optional pull mode (POST {farm_id, image_url}): we
+#   fetch image_url and require it to live under this base (SSRF guard). None
+#   disables pull mode entirely (push-a-file mode still works).
 REMOTE_SENSE_BASE_URL = os.environ.get('WO_REMOTE_SENSE_BASE_URL') or None
+
+# Sentinel imagery/analysis pulled DIRECTLY from Copernicus Data Space Ecosystem's
+# Sentinel Hub APIs (https://dataspace.copernicus.eu/) -- there is no external
+# "remote-sense" system; this server itself is the API client (see
+# agri/remote_sense/sentinel_client.py). Generate free OAuth client credentials in
+# the CDSE Dashboard: User Settings -> OAuth clients -> Create. The base/token URLs
+# are CDSE's fixed public endpoints (not secrets), so they're constants in
+# sentinel_client.py rather than env vars. None (either var) disables the client.
+SENTINEL_CLIENT_ID = os.environ.get('WO_SENTINEL_CLIENT_ID') or None
+SENTINEL_CLIENT_SECRET = os.environ.get('WO_SENTINEL_CLIENT_SECRET') or None
 
 # Maximum number of processing nodes to show in "Processing Nodes" menus/dropdowns
 UI_MAX_PROCESSING_NODES = None

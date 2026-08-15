@@ -10,12 +10,15 @@ import os
 
 from django.utils import timezone
 
-from agri.models import AnalysisResult
+from agri.models import AnalysisResult, CaptureMeta
 
 
 def build_report(run, output_path):
     results = {r.kind: r for r in run.results.all()}
     summary = {}
+
+    capture_meta = getattr(run.task, 'capture_meta', None)
+    summary["capture_source"] = getattr(capture_meta, 'source', CaptureMeta.DRONE)
 
     ph = results.get(AnalysisResult.PLANT_HEALTH)
     if ph:

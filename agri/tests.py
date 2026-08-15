@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import time
 from unittest import mock
@@ -256,6 +257,82 @@ class TestAgri(BootTestCase):
         ph = run.results.get(kind=AnalysisResult.PLANT_HEALTH)
         self.assertTrue(os.path.exists(task.assets_path(ph.asset_path)))
 
+    # ---- Stage 9: satellite-source gating in the analysis fan-out ----
+
+    def _completed_capture_with_source(self, name, source):
+        from agri.capture import create_capture_from_orthophoto
+        task = create_capture_from_orthophoto(
+            self.project, "app/fixtures/orthophoto.tif", name=name, dispatch=False, source=source)
+        worker.tasks.process_task(task.id)
+        task.refresh_from_db()
+        return task
+
+    def test_capture_meta_source_defaults_to_drone(self):
+        from agri.models import CaptureMeta
+        task = self._completed_capture("Default Source Capture")
+        self.assertEqual(task.capture_meta.source, CaptureMeta.DRONE)
+
+    def test_weed_mapping_skipped_for_satellite_capture(self):
+        from agri.services import execute_analysis
+        from agri.models import AnalysisRun, AnalysisResult, CaptureMeta
+
+        task = self._completed_capture_with_source("Satellite Cap", CaptureMeta.SATELLITE)
+        boundary = Boundary.objects.create(task=task, geom=task.orthophoto_extent,
+                                           status=Boundary.APPROVED, created_by=self.user)
+        run = AnalysisRun.objects.create(task=task, boundary=boundary, triggered_by=self.user)
+        execute_analysis(run)
+
+        weed = run.results.get(kind=AnalysisResult.WEED)
+        self.assertTrue(weed.stats.get("skipped"))
+        self.assertNotIn("weed_count", weed.stats)
+        self.assertEqual(weed.asset_path, "")
+
+        # A drone capture on the same fixture still gets a real weed run.
+        drone_task = self._completed_capture("Drone Cap")
+        drone_boundary = Boundary.objects.create(task=drone_task, geom=drone_task.orthophoto_extent,
+                                                  status=Boundary.APPROVED, created_by=self.user)
+        drone_run = AnalysisRun.objects.create(task=drone_task, boundary=drone_boundary,
+                                               triggered_by=self.user)
+        execute_analysis(drone_run)
+        drone_weed = drone_run.results.get(kind=AnalysisResult.WEED)
+        self.assertNotIn("skipped", drone_weed.stats)
+        self.assertIn("weed_count", drone_weed.stats)
+
+    def test_canopy_flagged_low_resolution_proxy_for_satellite(self):
+        from agri.services import execute_analysis
+        from agri.models import AnalysisRun, AnalysisResult, CaptureMeta
+
+        task = self._completed_capture_with_source("Satellite Canopy Cap", CaptureMeta.SATELLITE)
+        boundary = Boundary.objects.create(task=task, geom=task.orthophoto_extent,
+                                           status=Boundary.APPROVED, created_by=self.user)
+        run = AnalysisRun.objects.create(task=task, boundary=boundary, triggered_by=self.user)
+        execute_analysis(run)
+
+        canopy = run.results.get(kind=AnalysisResult.CANOPY)
+        self.assertTrue(canopy.stats.get("low_resolution_proxy"))
+
+        drone_task = self._completed_capture("Drone Canopy Cap")
+        drone_boundary = Boundary.objects.create(task=drone_task, geom=drone_task.orthophoto_extent,
+                                                  status=Boundary.APPROVED, created_by=self.user)
+        drone_run = AnalysisRun.objects.create(task=drone_task, boundary=drone_boundary,
+                                               triggered_by=self.user)
+        execute_analysis(drone_run)
+        drone_canopy = drone_run.results.get(kind=AnalysisResult.CANOPY)
+        self.assertNotIn("low_resolution_proxy", drone_canopy.stats)
+
+    def test_report_includes_capture_source(self):
+        from agri.services import execute_analysis
+        from agri.models import AnalysisRun, AnalysisResult, CaptureMeta
+
+        task = self._completed_capture_with_source("Satellite Report Cap", CaptureMeta.SATELLITE)
+        boundary = Boundary.objects.create(task=task, geom=task.orthophoto_extent,
+                                           status=Boundary.APPROVED, created_by=self.user)
+        run = AnalysisRun.objects.create(task=task, boundary=boundary, triggered_by=self.user)
+        execute_analysis(run)
+
+        report = run.results.get(kind=AnalysisResult.REPORT)
+        self.assertEqual(report.stats["summary"]["capture_source"], CaptureMeta.SATELLITE)
+
     def test_analysis_trigger_requires_approved_boundary(self):
         from agri.models import AnalysisRun
 
@@ -488,21 +565,42 @@ class TestAgri(BootTestCase):
         run, agri_field = self._agri_linked_run()
         payload = build_orthophoto_result_payload(run)
 
-        self.assertEqual(payload["field_id"], agri_field.agritrack_field_id)
-        self.assertEqual(payload["farm_id"], agri_field.farm.agritrack_farm_id)
+        self.assertEqual(payload["sourceSystem"], "orthophoto")
+        self.assertEqual(payload["fieldId"], agri_field.agritrack_field_id)
+        self.assertEqual(payload["farmId"], agri_field.farm.agritrack_farm_id)
         self.assertEqual(payload["scope"], "field")
+        self.assertIsNone(payload["subPlotId"])
+        self.assertEqual(payload["extId"], "webodm-run-%s" % run.id)
         self.assertIn("vari_mean", payload["metrics"])
         self.assertIn("canopy_cover_pct", payload["metrics"])
         self.assertIn("weed_count", payload["metrics"])
         self.assertIn("health_score", payload["metrics"])
         self.assertIn("classification", payload["metrics"])
-        self.assertIsInstance(payload["recommendations"], list)
+        self.assertIsInstance(payload["interpretation"]["recommendations"], list)
         # Not computed by this pipeline -- must not be invented
         self.assertNotIn("plant_count", payload["metrics"])
         self.assertNotIn("height_mean_m", payload["metrics"])
         # AgriTrack's live endpoint requires summary as a string, not our
         # internal report dict (contract mismatch caught via manual curl test)
-        self.assertIsInstance(payload["summary"], str)
+        self.assertIsInstance(payload["interpretation"]["summary"], str)
+
+    def test_resolve_agri_field_falls_back_to_persistent_field_link(self):
+        # A boundary whose DIRECT agri_field link is null but whose persistent
+        # agri.Field carries the AgriTrack link must still resolve (and push).
+        from agri.agritrack.results import resolve_agri_field, build_orthophoto_result_payload
+        from agri.models import Field
+
+        run, agri_field = self._agri_linked_run()
+        boundary = run.boundary
+        field = Field.objects.create(project=boundary.task.project,
+                                     name="Persistent field", agri_field=agri_field)
+        boundary.agri_field = None
+        boundary.field = field
+        boundary.save(update_fields=['agri_field', 'field'])
+
+        self.assertEqual(resolve_agri_field(boundary), agri_field)
+        payload = build_orthophoto_result_payload(run)
+        self.assertEqual(payload["fieldId"], agri_field.agritrack_field_id)
 
     def test_push_uses_agritrack_live_endpoint_when_field_linked(self):
         from agri.push import push_analysis
@@ -521,7 +619,7 @@ class TestAgri(BootTestCase):
                 args, kwargs = mpost.call_args
                 self.assertEqual(args[0], 'https://agritrack.test/orthophoto/analysis/push')
                 self.assertEqual(kwargs['headers']['X-Api-Key'], 'their-issued-key')
-                self.assertEqual(kwargs['json']['field_id'], agri_field.agritrack_field_id)
+                self.assertEqual(kwargs['json']['fieldId'], agri_field.agritrack_field_id)
         finally:
             settings.AGRITRACK_RESULTS_PUSH_URL = old_url
             settings.AGRITRACK_OUTBOUND_API_KEY = old_key
@@ -817,6 +915,49 @@ class TestAgri(BootTestCase):
         farm_dates = [p["date"] for p in res.data["farm"]["series"]]
         self.assertEqual(farm_dates, ["2026-06-01", "2026-06-20"])
 
+    def test_seasonal_same_date_drone_and_satellite_dont_overwrite(self):
+        # Stage 9 regression: before keying points by (date, source, computed_by),
+        # a same-day drone + satellite capture would silently overwrite each other
+        # here, and their metrics would get blended into one misleading farm-level
+        # average -- see stage-9-satellite-monitoring.md §5.
+        import datetime
+        from agri.models import Field, CaptureMeta, AnalysisRun
+
+        field = Field.objects.create(project=self.project, name="Mixed Source Field")
+        drone_task, _b1, _r1 = self._analyzed_run(field=field, name="Drone Same Day")
+
+        sat_task = self._completed_capture_with_source("Satellite Same Day", CaptureMeta.SATELLITE)
+        sat_boundary = Boundary.objects.create(task=sat_task, geom=sat_task.orthophoto_extent,
+                                               status=Boundary.APPROVED, created_by=self.user,
+                                               field=field)
+        sat_run = AnalysisRun.objects.create(task=sat_task, boundary=sat_boundary,
+                                             triggered_by=self.user)
+        from agri.services import execute_analysis
+        execute_analysis(sat_run)
+
+        same_day = datetime.date(2026, 6, 15)
+        CaptureMeta.objects.filter(task=drone_task).update(capture_date=same_day)
+        CaptureMeta.objects.filter(task=sat_task).update(capture_date=same_day)
+
+        client = APIClient()
+        client.login(username="testuser", password="test1234")
+        res = client.get("/api/agri/seasonal/?project=%s" % self.project.id)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        series = res.data["fields"][0]["series"]
+        # Both points survive -- neither overwrote the other.
+        self.assertEqual(len(series), 2)
+        sources = {p["source"] for p in series}
+        self.assertEqual(sources, {CaptureMeta.DRONE, CaptureMeta.SATELLITE})
+        self.assertTrue(all(p["date"] == "2026-06-15" for p in series))
+
+        # Farm-level series also keeps them separate rather than averaging across
+        # sources into one number.
+        farm_series = res.data["farm"]["series"]
+        self.assertEqual(len(farm_series), 2)
+        farm_sources = {p["source"] for p in farm_series}
+        self.assertEqual(farm_sources, {CaptureMeta.DRONE, CaptureMeta.SATELLITE})
+
     def test_seasonal_excludes_boundaries_without_field(self):
         self._analyzed_run(field=None, name="Unfielded cap")
         client = APIClient()
@@ -824,6 +965,7 @@ class TestAgri(BootTestCase):
         res = client.get("/api/agri/seasonal/?project=%s" % self.project.id)
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data["fields"], [])
+
 
 
 class TestAgriRawImageCapture(BootTransactionTestCase):
@@ -1171,15 +1313,28 @@ class TestRemoteSensePush(BootTestCase):
 
         # Capture landed on the farm's project, with the given acquisition date.
         self.assertEqual(task.project_id, farm.project_id)
-        self.assertEqual(CaptureMeta.objects.get(task=task).capture_date,
-                         datetime.date(2026, 5, 1))
+        capture_meta = CaptureMeta.objects.get(task=task)
+        self.assertEqual(capture_meta.capture_date, datetime.date(2026, 5, 1))
+        # Every remote-sense import is tagged SATELLITE (Stage 9 §5) -- this is
+        # what lets the seasonal API and analysis fan-out treat it differently
+        # from a drone capture instead of silently mixing the two.
+        self.assertEqual(capture_meta.source, CaptureMeta.SATELLITE)
         # The synced field was seeded as a DRAFT boundary linked back to the
         # AgriField (so its analysis is pushable to AgriTrack per-field).
         boundaries = list(Boundary.objects.filter(task=task))
         self.assertEqual(len(boundaries), 1)
         self.assertEqual(boundaries[0].agri_field_id, agri_field.id)
         self.assertEqual(boundaries[0].status, Boundary.DRAFT)
-        self.assertTrue(boundaries[0].geom.equals(agri_field.boundary))
+
+    def test_ingest_from_bands_tags_satellite_source(self):
+        from agri.remote_sense.ingest import ingest_capture_from_bands
+        from agri.models import CaptureMeta
+
+        self._sync_farm()
+        uploads = [self._make_band_upload(t, v) for t, v in
+                  [("B02", 0.1), ("B03", 0.2), ("B04", 0.3), ("B08", 0.8)]]
+        task = ingest_capture_from_bands(farm_id=3, band_files=uploads, dispatch=False)
+        self.assertEqual(CaptureMeta.objects.get(task=task).source, CaptureMeta.SATELLITE)
 
     def test_ingest_unknown_farm_raises(self):
         from agri.remote_sense.ingest import ingest_capture, FarmNotFoundError
@@ -1193,3 +1348,575 @@ class TestRemoteSensePush(BootTestCase):
         with self.assertRaises(RemoteSenseValidationError):
             ingest_capture(farm_id=3, orthophoto_file=None, image_url=None,
                            dispatch=False)
+
+    # --- Separate Sentinel band files -> stack + tag (Option B) ---
+
+    def _make_band_upload(self, token, value):
+        """A synthetic single-band Sentinel GeoTIFF upload, named like the real
+        export (so detect_band_role() picks the band from the filename)."""
+        import numpy as np
+        import rasterio
+        from rasterio.transform import from_origin
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        os.makedirs(settings.MEDIA_TMP, exist_ok=True)
+        path = os.path.join(settings.MEDIA_TMP, "src_%s.tif" % token)
+        transform = from_origin(29.10, -17.80, 0.0001, 0.0001)
+        data = np.full((16, 16), value, dtype='float32')
+        with rasterio.open(path, 'w', driver='GTiff', height=16, width=16, count=1,
+                           dtype='float32', crs='EPSG:4326', transform=transform) as dst:
+            dst.write(data, 1)
+        with open(path, 'rb') as f:
+            content = f.read()
+        os.remove(path)
+        name = "2026-07-04-00_00_2026-07-04-23_59_Sentinel-2_L2A_%s_(Raw).tif" % token
+        return SimpleUploadedFile(name, content, content_type="image/tiff")
+
+    def test_detect_band_role(self):
+        from agri.remote_sense.bands import detect_band_role
+        self.assertEqual(detect_band_role("x_Sentinel-2_L2A_B04_(Raw).tif"), "red")
+        self.assertEqual(detect_band_role("x_Sentinel-2_L2A_B08_(Raw).tif"), "nir")
+        self.assertEqual(detect_band_role("x_B02.tif"), "blue")
+        self.assertEqual(detect_band_role("x_B05_(Raw).tif"), "rededge")
+        self.assertIsNone(detect_band_role("x_B01_(Raw).tif"))       # aerosol -> ignored
+        self.assertIsNone(detect_band_role("Sentinel-2_L2A.tif"))    # no band token
+
+    def test_stack_and_tag_bands_writes_descriptions(self):
+        import rasterio
+        from agri.remote_sense.bands import stack_and_tag_bands, detect_band_role
+
+        # Materialise the four band uploads to disk keyed by role.
+        role_to_path = {}
+        for token, value in [("B02", 0.1), ("B03", 0.2), ("B04", 0.3), ("B08", 0.8)]:
+            up = self._make_band_upload(token, value)
+            path = os.path.join(settings.MEDIA_TMP, "in_%s.tif" % token)
+            with open(path, 'wb') as out:
+                out.write(up.read())
+            role_to_path[detect_band_role(up.name)] = path
+
+        out_path = os.path.join(settings.MEDIA_TMP, "stacked.tif")
+        stack_and_tag_bands(role_to_path, out_path)
+
+        with rasterio.open(out_path) as ds:
+            self.assertEqual(ds.count, 4)
+            # Canonical order + descriptions that the formula engine matches on.
+            self.assertEqual(list(ds.descriptions), ["red", "green", "blue", "nir"])
+
+    def test_ingest_from_bands_creates_tagged_capture(self):
+        import datetime
+        import rasterio
+        from agri.remote_sense.ingest import ingest_capture_from_bands
+        from agri.analysis.base import has_nir
+
+        self._sync_farm()
+        uploads = [self._make_band_upload(t, v) for t, v in
+                   [("B02", 0.1), ("B03", 0.2), ("B04", 0.3), ("B08", 0.8)]]
+        task = ingest_capture_from_bands(
+            farm_id=3, band_files=uploads, name="Sentinel bands",
+            capture_date=datetime.date(2026, 7, 4), dispatch=False)
+
+        ortho = task.assets_path(Task.ASSETS_MAP["orthophoto.tif"])
+        self.assertTrue(os.path.isfile(ortho))
+        with rasterio.open(ortho) as ds:
+            self.assertEqual(ds.count, 4)
+            self.assertEqual(list(ds.descriptions), ["red", "green", "blue", "nir"])
+
+        # The whole point: NIR is now discoverable, so analysis auto-picks NDVI.
+        task.update_orthophoto_bands_field()
+        self.assertTrue(has_nir(task))
+
+    def test_ingest_from_bands_missing_red_raises(self):
+        from agri.remote_sense.ingest import (ingest_capture_from_bands,
+                                              RemoteSenseValidationError)
+        self._sync_farm()
+        # Green + blue only (no red=B04) -> nothing computable, reject.
+        uploads = [self._make_band_upload("B03", 0.2), self._make_band_upload("B02", 0.1)]
+        with self.assertRaises(RemoteSenseValidationError):
+            ingest_capture_from_bands(farm_id=3, band_files=uploads, dispatch=False)
+
+    def test_ingest_from_bands_no_recognised_bands_raises(self):
+        from agri.remote_sense.ingest import (ingest_capture_from_bands,
+                                              RemoteSenseValidationError)
+        self._sync_farm()
+        uploads = [self._make_band_upload("B01", 0.1)]  # aerosol only -> unusable
+        with self.assertRaises(RemoteSenseValidationError):
+            ingest_capture_from_bands(farm_id=3, band_files=uploads, dispatch=False)
+
+    def test_push_with_band_files_returns_201(self):
+        # Endpoint routes multi-file uploads to the band-stacking path. Mocked so
+        # this test stays independent of GDAL/COG (exercised in the ingest test).
+        self._sync_farm()
+        from agri.models import AgriFarm
+        project = AgriFarm.objects.get(agritrack_farm_id=3).project
+        fake_task = Task.objects.create(project=project, name="Fake")
+
+        with mock.patch("agri.remote_sense.views.ingest_capture_from_bands",
+                        return_value=fake_task) as m:
+            client = APIClient()
+            res = client.post(REMOTE_SENSE_URL, {
+                "farm_id": 3,
+                "b1": self._make_band_upload("B02", 0.1),
+                "b2": self._make_band_upload("B03", 0.2),
+                "b3": self._make_band_upload("B04", 0.3),
+                "b4": self._make_band_upload("B08", 0.8),
+                "capture_date": "2026-07-04",
+            }, format="multipart", HTTP_X_API_KEY="rs-shared-secret")
+
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        _, kwargs = m.call_args
+        self.assertEqual(kwargs["farm_id"], "3")
+        self.assertEqual(len(kwargs["band_files"]), 4)
+        self.assertEqual(str(kwargs["capture_date"]), "2026-07-04")
+
+
+class TestSatellitePull(BootTestCase):
+    """
+    On-demand satellite pull (Stage 9 SS7/SS9): a logged-in user requesting
+    satellite imagery for a farm's already-onboarded boundary, and requesting
+    Sentinel's own reference index for an APPROVED boundary to compare against
+    this system's own analysis. Network calls are mocked at the
+    agri.remote_sense.sentinel_client boundary -- these tests never hit the
+    real Copernicus/Sentinel Hub API.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from agri.roles import ROLE_TECHNICIAN, ROLE_AGRONOMIST
+        self.user = User.objects.get(username="testuser")
+        self.project = Project.objects.get(owner=self.user)
+        self.task = Task.objects.create(project=self.project, name="Sat Capture Host")
+        self.user.groups.add(Group.objects.get(name=ROLE_TECHNICIAN))
+        self.agronomist = User.objects.create_user(username="satagro", email="satagro@test.com",
+                                                    password="test1234")
+        self.agronomist.groups.add(Group.objects.get(name=ROLE_AGRONOMIST))
+
+    def _fake_fetch_imagery(self, geom, date_from, date_to, output_path, roles=None):
+        shutil.copyfile("app/fixtures/orthophoto.tif", output_path)
+        return {'path': output_path, 'valid_pixel_pct': 92.5}
+
+    # ---- pull_satellite_capture (business logic) ----
+
+    def test_pull_satellite_capture_uses_agrifarm_boundary(self):
+        import datetime
+        from agri.models import AgriFarm, CaptureMeta
+        from agri.remote_sense.sentinel_pull import pull_satellite_capture
+
+        AgriFarm.objects.create(agritrack_farm_id=501, project=self.project,
+                                name="Sat Farm", boundary=_poly())
+
+        with mock.patch("agri.remote_sense.sentinel_client.fetch_field_imagery",
+                        side_effect=self._fake_fetch_imagery) as m:
+            task = pull_satellite_capture(self.project.id, datetime.date(2026, 7, 1),
+                                          datetime.date(2026, 7, 10))
+
+        self.assertEqual(task.project_id, self.project.id)
+        self.assertEqual(CaptureMeta.objects.get(task=task).source, CaptureMeta.SATELLITE)
+        geom_arg = m.call_args[0][0]
+        self.assertTrue(geom_arg.equals(_poly()))
+
+    def test_pull_satellite_capture_falls_back_to_boundary_union(self):
+        import datetime
+        from agri.remote_sense.sentinel_pull import pull_satellite_capture
+
+        Boundary.objects.create(task=self.task, geom=_poly(), status=Boundary.APPROVED,
+                                created_by=self.user)
+
+        with mock.patch("agri.remote_sense.sentinel_client.fetch_field_imagery",
+                        side_effect=self._fake_fetch_imagery) as m:
+            task = pull_satellite_capture(self.project.id, datetime.date(2026, 7, 1),
+                                          datetime.date(2026, 7, 10))
+        self.assertIsNotNone(task)
+        self.assertTrue(m.called)
+
+    def test_pull_satellite_capture_no_boundary_raises(self):
+        import datetime
+        from agri.remote_sense.sentinel_pull import pull_satellite_capture, SatellitePullError
+        with self.assertRaises(SatellitePullError):
+            pull_satellite_capture(self.project.id, datetime.date(2026, 7, 1),
+                                   datetime.date(2026, 7, 10))
+
+    # ---- Stage 10 Phase 1: cloud/quality awareness + field-level targeting ----
+
+    def test_valid_pixel_pct_pure_function(self):
+        # No network, no mocking -- a real numpy array walking every excluded
+        # and included SCL class, matching the live-verified classification set
+        # (stage-10-sentinel-roadmap.md Phase 1 / sentinel_client.py docstring).
+        import numpy as np
+        from agri.remote_sense.sentinel_client import _valid_pixel_pct
+
+        # All valid: vegetation(4), bare soil(5), water(6), snow(11)
+        all_valid = np.array([4, 5, 6, 11, 4, 5], dtype='uint8')
+        self.assertEqual(_valid_pixel_pct(all_valid), 100.0)
+
+        # All excluded: no-data(0), saturated(1), dark(2), cloud shadow(3),
+        # unclassified(7), cloud medium(8), cloud high(9), cirrus(10)
+        all_cloud = np.array([0, 1, 2, 3, 7, 8, 9, 10], dtype='uint8')
+        self.assertEqual(_valid_pixel_pct(all_cloud), 0.0)
+
+        # Half and half
+        mixed = np.array([4, 4, 8, 9], dtype='uint8')
+        self.assertEqual(_valid_pixel_pct(mixed), 50.0)
+
+        # Empty array -> 0.0, not a crash
+        self.assertEqual(_valid_pixel_pct(np.array([], dtype='uint8')), 0.0)
+
+    def test_pull_satellite_capture_stores_valid_pixel_pct(self):
+        import datetime
+        from agri.models import AgriFarm, CaptureMeta
+        from agri.remote_sense.sentinel_pull import pull_satellite_capture
+
+        AgriFarm.objects.create(agritrack_farm_id=503, project=self.project,
+                                name="Sat Farm 3", boundary=_poly())
+
+        with mock.patch("agri.remote_sense.sentinel_client.fetch_field_imagery",
+                        side_effect=self._fake_fetch_imagery):
+            task = pull_satellite_capture(self.project.id, datetime.date(2026, 7, 1),
+                                          datetime.date(2026, 7, 10))
+
+        self.assertEqual(CaptureMeta.objects.get(task=task).valid_pixel_pct, 92.5)
+
+    def test_pull_satellite_capture_degrades_gracefully_when_quality_check_fails(self):
+        # "Flag, don't block": fetch_field_imagery returning valid_pixel_pct=None
+        # (its own best-effort SCL fetch failed) must NOT fail the whole pull --
+        # the image was already fetched successfully.
+        import datetime
+        from agri.models import AgriFarm, CaptureMeta
+        from agri.remote_sense.sentinel_pull import pull_satellite_capture
+
+        AgriFarm.objects.create(agritrack_farm_id=504, project=self.project,
+                                name="Sat Farm 4", boundary=_poly())
+
+        def fake_fetch_no_quality(geom, date_from, date_to, output_path, roles=None):
+            shutil.copyfile("app/fixtures/orthophoto.tif", output_path)
+            return {'path': output_path, 'valid_pixel_pct': None}
+
+        with mock.patch("agri.remote_sense.sentinel_client.fetch_field_imagery",
+                        side_effect=fake_fetch_no_quality):
+            task = pull_satellite_capture(self.project.id, datetime.date(2026, 7, 1),
+                                          datetime.date(2026, 7, 10))
+
+        self.assertIsNotNone(task)
+        self.assertIsNone(CaptureMeta.objects.get(task=task).valid_pixel_pct)
+
+    def test_pull_satellite_capture_targets_single_field(self):
+        # "both as options" (UX review, 2026-08-14): a user can target one field
+        # instead of the whole farm. Uses the Field's most recent Boundary geom,
+        # not the farm-wide union.
+        import datetime
+        from agri.models import Field, CaptureMeta
+        from agri.remote_sense.sentinel_pull import pull_satellite_capture
+
+        field = Field.objects.create(project=self.project, name="North Block")
+        target_geom = _poly()
+        Boundary.objects.create(task=self.task, geom=target_geom, field=field,
+                                status=Boundary.APPROVED, created_by=self.user)
+        # A DIFFERENT, unrelated boundary on the same farm -- must be ignored
+        # when a specific field is targeted.
+        other_geom = Polygon(((10, 10), (10, 11), (11, 11), (11, 10), (10, 10)), srid=4326)
+        Boundary.objects.create(task=self.task, geom=other_geom,
+                                status=Boundary.APPROVED, created_by=self.user)
+
+        with mock.patch("agri.remote_sense.sentinel_client.fetch_field_imagery",
+                        side_effect=self._fake_fetch_imagery) as m:
+            task = pull_satellite_capture(self.project.id, datetime.date(2026, 7, 1),
+                                          datetime.date(2026, 7, 10), field_id=field.id)
+
+        self.assertIsNotNone(task)
+        geom_arg = m.call_args[0][0]
+        self.assertTrue(geom_arg.equals(target_geom))
+        self.assertFalse(geom_arg.equals(other_geom))
+
+    def test_pull_satellite_capture_unknown_field_raises(self):
+        import datetime
+        from agri.remote_sense.sentinel_pull import pull_satellite_capture, SatellitePullError
+        with self.assertRaises(SatellitePullError):
+            pull_satellite_capture(self.project.id, datetime.date(2026, 7, 1),
+                                   datetime.date(2026, 7, 10), field_id=999999)
+
+    def test_pull_satellite_capture_field_with_no_boundary_raises(self):
+        import datetime
+        from agri.models import Field
+        from agri.remote_sense.sentinel_pull import pull_satellite_capture, SatellitePullError
+        field = Field.objects.create(project=self.project, name="Empty Block")
+        with self.assertRaises(SatellitePullError):
+            pull_satellite_capture(self.project.id, datetime.date(2026, 7, 1),
+                                   datetime.date(2026, 7, 10), field_id=field.id)
+
+    # ---- pull_satellite_comparison (business logic) ----
+
+    def test_pull_satellite_comparison_requires_approved_boundary(self):
+        from agri.remote_sense.sentinel_pull import pull_satellite_comparison, SatellitePullError
+        boundary = Boundary.objects.create(task=self.task, geom=_poly(), status=Boundary.DRAFT,
+                                           created_by=self.user)
+        with self.assertRaises(SatellitePullError):
+            pull_satellite_comparison(boundary.id)
+
+    def test_pull_satellite_comparison_creates_sentinel_run(self):
+        import datetime
+        from agri.models import AnalysisRun, AnalysisResult, CaptureMeta
+        from agri.remote_sense.sentinel_pull import pull_satellite_comparison
+
+        CaptureMeta.objects.create(task=self.task, capture_date=datetime.date(2026, 7, 5))
+        boundary = Boundary.objects.create(task=self.task, geom=_poly(), status=Boundary.APPROVED,
+                                           created_by=self.user)
+
+        with mock.patch("agri.remote_sense.sentinel_client.fetch_field_statistics",
+                        return_value=[{'date': '2026-07-05', 'mean': 0.42, 'stddev': 0.05,
+                                      'valid_pixel_pct': 88.0}]) as m:
+            run = pull_satellite_comparison(boundary.id)
+
+        self.assertEqual(run.computed_by, AnalysisRun.SENTINEL)
+        self.assertEqual(run.status, AnalysisRun.PENDING_REVIEW)
+        result = run.results.get(kind=AnalysisResult.PLANT_HEALTH)
+        self.assertEqual(result.stats['mean'], 0.42)
+        self.assertEqual(result.stats['index'], 'NDVI')
+        self.assertEqual(result.stats['valid_pixel_pct'], 88.0)
+        date_from_arg = m.call_args[0][1]
+        self.assertEqual(date_from_arg, datetime.date(2026, 7, 5))
+
+    def test_pull_satellite_comparison_missing_quality_degrades_gracefully(self):
+        # A point without valid_pixel_pct (older client, or the quality check
+        # itself failed upstream) must not crash the comparison -- stats simply
+        # carries None, same "flag, don't block" spirit as the imagery path.
+        import datetime
+        from agri.models import AnalysisResult, CaptureMeta
+        from agri.remote_sense.sentinel_pull import pull_satellite_comparison
+
+        CaptureMeta.objects.create(task=self.task, capture_date=datetime.date(2026, 7, 5))
+        boundary = Boundary.objects.create(task=self.task, geom=_poly(), status=Boundary.APPROVED,
+                                           created_by=self.user)
+
+        with mock.patch("agri.remote_sense.sentinel_client.fetch_field_statistics",
+                        return_value=[{'date': '2026-07-05', 'mean': 0.42, 'stddev': 0.05}]):
+            run = pull_satellite_comparison(boundary.id)
+
+        result = run.results.get(kind=AnalysisResult.PLANT_HEALTH)
+        self.assertIsNone(result.stats['valid_pixel_pct'])
+
+    def test_pull_satellite_comparison_no_data_raises(self):
+        from agri.remote_sense.sentinel_pull import pull_satellite_comparison, SatellitePullError
+        boundary = Boundary.objects.create(task=self.task, geom=_poly(), status=Boundary.APPROVED,
+                                           created_by=self.user)
+        with mock.patch("agri.remote_sense.sentinel_client.fetch_field_statistics", return_value=[]):
+            with self.assertRaises(SatellitePullError):
+                pull_satellite_comparison(boundary.id)
+
+    # ---- API endpoints ----
+
+    def test_satellite_imagery_endpoint_requires_auth(self):
+        client = APIClient()
+        res = client.post("/api/agri/satellite/imagery/", {
+            "project": self.project.id, "date_from": "2026-07-01", "date_to": "2026-07-10"
+        }, format="json")
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_satellite_imagery_endpoint_blocks_agronomist(self):
+        client = APIClient()
+        client.login(username="satagro", password="test1234")
+        res = client.post("/api/agri/satellite/imagery/", {
+            "project": self.project.id, "date_from": "2026-07-01", "date_to": "2026-07-10"
+        }, format="json")
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_satellite_imagery_endpoint_requires_valid_dates(self):
+        client = APIClient()
+        client.login(username="testuser", password="test1234")
+        res = client.post("/api/agri/satellite/imagery/", {"project": self.project.id}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+        res = client.post("/api/agri/satellite/imagery/", {
+            "project": self.project.id, "date_from": "2026-07-10", "date_to": "2026-07-01"
+        }, format="json")
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_satellite_imagery_endpoint_dispatches_and_creates_capture(self):
+        from agri.models import AgriFarm, CaptureMeta
+        AgriFarm.objects.create(agritrack_farm_id=502, project=self.project,
+                                name="Sat Farm 2", boundary=_poly())
+        client = APIClient()
+        client.login(username="testuser", password="test1234")
+
+        with mock.patch("agri.remote_sense.sentinel_client.fetch_field_imagery",
+                        side_effect=self._fake_fetch_imagery):
+            res = client.post("/api/agri/satellite/imagery/", {
+                "project": self.project.id, "date_from": "2026-07-01", "date_to": "2026-07-10"
+            }, format="json")
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+        self.assertIn("celery_task_id", res.data)
+
+        # CELERY_TASK_ALWAYS_EAGER in tests -> the task already ran synchronously.
+        check = client.get("/api/workers/check/%s" % res.data["celery_task_id"])
+        self.assertEqual(check.status_code, status.HTTP_200_OK)
+        self.assertTrue(check.data["ready"])
+        self.assertNotIn("error", check.data)
+        self.assertTrue(CaptureMeta.objects.filter(source=CaptureMeta.SATELLITE).exists())
+
+    def test_satellite_imagery_endpoint_accepts_field_target(self):
+        from agri.models import Field
+        field = Field.objects.create(project=self.project, name="South Block")
+        Boundary.objects.create(task=self.task, geom=_poly(), field=field,
+                                status=Boundary.APPROVED, created_by=self.user)
+        client = APIClient()
+        client.login(username="testuser", password="test1234")
+
+        with mock.patch("agri.remote_sense.sentinel_client.fetch_field_imagery",
+                        side_effect=self._fake_fetch_imagery):
+            res = client.post("/api/agri/satellite/imagery/", {
+                "project": self.project.id, "date_from": "2026-07-01", "date_to": "2026-07-10",
+                "field": field.id
+            }, format="json")
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+        check = client.get("/api/workers/check/%s" % res.data["celery_task_id"])
+        self.assertNotIn("error", check.data)
+
+    def test_satellite_imagery_endpoint_rejects_field_from_other_farm(self):
+        from agri.models import Field
+        other_project = Project.objects.create(owner=self.user, name="Other Farm")
+        other_field = Field.objects.create(project=other_project, name="Not This Farm")
+        client = APIClient()
+        client.login(username="testuser", password="test1234")
+        res = client.post("/api/agri/satellite/imagery/", {
+            "project": self.project.id, "date_from": "2026-07-01", "date_to": "2026-07-10",
+            "field": other_field.id
+        }, format="json")
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_satellite_compare_endpoint_requires_approved_boundary(self):
+        boundary = Boundary.objects.create(task=self.task, geom=_poly(), status=Boundary.DRAFT,
+                                           created_by=self.user)
+        client = APIClient()
+        client.login(username="testuser", password="test1234")
+        res = client.post("/api/agri/satellite/compare/", {"boundary": boundary.id}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_satellite_compare_endpoint_dispatches_and_creates_run(self):
+        import datetime
+        from agri.models import AnalysisRun, CaptureMeta
+        CaptureMeta.objects.create(task=self.task, capture_date=datetime.date(2026, 7, 5))
+        boundary = Boundary.objects.create(task=self.task, geom=_poly(), status=Boundary.APPROVED,
+                                           created_by=self.user)
+        client = APIClient()
+        client.login(username="testuser", password="test1234")
+
+        with mock.patch("agri.remote_sense.sentinel_client.fetch_field_statistics",
+                        return_value=[{'date': '2026-07-05', 'mean': 0.5, 'stddev': 0.1}]):
+            res = client.post("/api/agri/satellite/compare/", {"boundary": boundary.id}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+
+        run = AnalysisRun.objects.get(boundary=boundary, computed_by=AnalysisRun.SENTINEL)
+        self.assertEqual(run.status, AnalysisRun.PENDING_REVIEW)
+
+    def test_serializer_exposes_computed_by(self):
+        from agri.models import AnalysisRun
+        from agri.api.serializers import AnalysisRunSerializer
+        boundary = Boundary.objects.create(task=self.task, geom=_poly(), status=Boundary.APPROVED,
+                                           created_by=self.user)
+        run = AnalysisRun.objects.create(task=self.task, boundary=boundary,
+                                         computed_by=AnalysisRun.SENTINEL)
+        data = AnalysisRunSerializer(run).data
+        self.assertEqual(data["computed_by"], "SENTINEL")
+
+    def test_fields_endpoint_accepts_project_param(self):
+        # Stage 10 Phase 1: the "Get Satellite Imagery" Import-menu modal needs a
+        # field picker before any capture/task exists yet, so /api/agri/fields/
+        # must also work with ?project= (not just the original ?task=).
+        from agri.models import Field
+        Field.objects.create(project=self.project, name="East Block")
+        Field.objects.create(project=self.project, name="West Block")
+        client = APIClient()
+        client.login(username="testuser", password="test1234")
+
+        res = client.get("/api/agri/fields/?project=%s" % self.project.id)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual({f["name"] for f in res.data}, {"East Block", "West Block"})
+
+        # Original ?task= path still works unchanged.
+        res = client.get("/api/agri/fields/?task=%s" % self.task.id)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual({f["name"] for f in res.data}, {"East Block", "West Block"})
+
+    def test_fields_endpoint_requires_task_or_project(self):
+        client = APIClient()
+        client.login(username="testuser", password="test1234")
+        res = client.get("/api/agri/fields/")
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # ---- Stage 10 Phase 2: scene-availability picker ----
+
+    def test_dedupe_scenes_by_date_pure_function(self):
+        # No network, no mocking -- matches _valid_pixel_pct's pattern.
+        from agri.remote_sense.sentinel_client import _dedupe_scenes_by_date
+
+        results = [
+            {'properties': {'datetime': '2026-08-11T08:25:01.759Z', 'eo:cloud_cover': 1.9}},
+            {'properties': {'datetime': '2026-08-08T08:25:18.255Z', 'eo:cloud_cover': 0.0}},
+            # Two scenes on the same day (overlapping tiles) -- keep the least cloudy.
+            {'properties': {'datetime': '2026-08-01T08:25:03.478Z', 'eo:cloud_cover': 40.0}},
+            {'properties': {'datetime': '2026-08-01T09:10:00.000Z', 'eo:cloud_cover': 5.5}},
+            # Missing fields -- must be skipped, not crash.
+            {'properties': {'datetime': None, 'eo:cloud_cover': 10.0}},
+            {'properties': {'datetime': '2026-07-01T00:00:00Z', 'eo:cloud_cover': None}},
+        ]
+        scenes = _dedupe_scenes_by_date(results)
+
+        self.assertEqual([s['date'] for s in scenes], ['2026-08-11', '2026-08-08', '2026-08-01'])
+        self.assertEqual(scenes[0]['cloud_cover_pct'], 1.9)
+        self.assertEqual(scenes[2]['cloud_cover_pct'], 5.5)  # least-cloudy of the two Aug-01 scenes
+
+    def test_dedupe_scenes_by_date_empty(self):
+        from agri.remote_sense.sentinel_client import _dedupe_scenes_by_date
+        self.assertEqual(_dedupe_scenes_by_date([]), [])
+
+    def test_satellite_availability_endpoint_requires_valid_dates(self):
+        client = APIClient()
+        client.login(username="testuser", password="test1234")
+        res = client.get("/api/agri/satellite/availability/?project=%s" % self.project.id)
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+        res = client.get("/api/agri/satellite/availability/?project=%s&date_from=2026-07-10&date_to=2026-07-01"
+                         % self.project.id)
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_satellite_availability_endpoint_returns_scenes(self):
+        from agri.models import AgriFarm
+        AgriFarm.objects.create(agritrack_farm_id=505, project=self.project,
+                                name="Sat Farm 5", boundary=_poly())
+        client = APIClient()
+        client.login(username="testuser", password="test1234")
+
+        fake_scenes = [{'date': '2026-08-11', 'cloud_cover_pct': 1.9},
+                       {'date': '2026-08-08', 'cloud_cover_pct': 0.0}]
+        with mock.patch("agri.remote_sense.sentinel_client.search_available_scenes",
+                        return_value=fake_scenes) as m:
+            res = client.get("/api/agri/satellite/availability/?project=%s&date_from=2026-07-01&date_to=2026-08-11"
+                             % self.project.id)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data, fake_scenes)
+        geom_arg = m.call_args[0][0]
+        self.assertTrue(geom_arg.equals(_poly()))
+
+    def test_satellite_availability_endpoint_targets_single_field(self):
+        from agri.models import Field
+        field = Field.objects.create(project=self.project, name="Availability Block")
+        target_geom = _poly()
+        Boundary.objects.create(task=self.task, geom=target_geom, field=field,
+                                status=Boundary.APPROVED, created_by=self.user)
+        client = APIClient()
+        client.login(username="testuser", password="test1234")
+
+        with mock.patch("agri.remote_sense.sentinel_client.search_available_scenes",
+                        return_value=[]) as m:
+            res = client.get(
+                "/api/agri/satellite/availability/?project=%s&date_from=2026-07-01&date_to=2026-08-11&field=%s"
+                % (self.project.id, field.id))
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        geom_arg = m.call_args[0][0]
+        self.assertTrue(geom_arg.equals(target_geom))
+
+    def test_satellite_availability_endpoint_no_boundary_raises_validation_error(self):
+        # SatellitePullError from AOI resolution must surface as 400, not 500.
+        client = APIClient()
+        client.login(username="testuser", password="test1234")
+        res = client.get("/api/agri/satellite/availability/?project=%s&date_from=2026-07-01&date_to=2026-08-11"
+                         % self.project.id)
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)

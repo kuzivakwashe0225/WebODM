@@ -7,8 +7,10 @@ module resolves that farm to its WebODM Project and imports the GeoTIFF as a
 Capture via the normal external-import path (agri.capture) -- no processing node,
 since a satellite orthophoto is already georeferenced.
 
-Two delivery modes are supported:
+Three delivery modes are supported:
   - push: the .tif bytes are uploaded directly (multipart) -> a file-like object
+  - bands: several single-band .tif files (B02/B03/B04/B08/...) are uploaded and
+           stacked+tagged into one multi-band COG here (see bands.py) before import
   - pull: a JSON {farm_id, image_url} is posted and we fetch image_url from the
           remote-sense host (restricted to settings.REMOTE_SENSE_BASE_URL as an
           SSRF guard, authenticated with our shared key).
@@ -23,8 +25,10 @@ import tempfile
 import requests
 
 from webodm import settings
-from agri.models import AgriFarm
+from agri.models import AgriFarm, CaptureMeta
 from agri.capture import create_capture_from_orthophoto
+from agri.remote_sense.bands import (stack_and_tag_bands, detect_band_role,
+                                     BandStackError)
 
 
 class RemoteSenseValidationError(Exception):
@@ -99,21 +103,93 @@ def ingest_capture(farm_id, orthophoto_file=None, image_url=None,
     project = resolve_project(farm_id)
 
     if orthophoto_file is not None:
-        source = orthophoto_file
+        ortho_source = orthophoto_file
         tmp_path = None
     elif image_url:
-        source = tmp_path = _fetch_image_to_tempfile(image_url)
+        ortho_source = tmp_path = _fetch_image_to_tempfile(image_url)
     else:
         raise RemoteSenseValidationError(
             "Provide either an 'orthophoto' file or an 'image_url'")
 
     try:
         task = create_capture_from_orthophoto(
-            project, source,
+            project, ortho_source,
             name=name or ('Sentinel capture (farm %s)' % farm_id),
-            dispatch=dispatch, capture_date=capture_date)
+            dispatch=dispatch, capture_date=capture_date,
+            source=CaptureMeta.SATELLITE)
     finally:
         if image_url and tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
+
+    return task
+
+
+def _iter_chunks(f):
+    """Yield bytes from a Django UploadedFile (.chunks) or a plain file-like (.read)."""
+    if hasattr(f, 'chunks'):
+        for chunk in f.chunks():
+            yield chunk
+    elif hasattr(f, 'read'):
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            yield chunk
+    else:
+        raise RemoteSenseValidationError("uploaded band is not a readable file")
+
+
+def ingest_capture_from_bands(farm_id, band_files, name=None, capture_date=None,
+                              dispatch=True):
+    """
+    Stack several single-band Sentinel uploads into one tagged multi-band COG and
+    import it as a Capture. Each file's name must contain its band token (B02,
+    B03, B04, B08, ...); bands we don't use are ignored (see bands.py).
+
+    :param band_files: iterable of Django UploadedFile / file-like objects.
+    :return: the created Task (Capture).
+    """
+    project = resolve_project(farm_id)
+
+    os.makedirs(settings.MEDIA_TMP, exist_ok=True)
+    role_to_path = {}
+    tmp_paths = []
+    stacked_path = None
+    try:
+        for f in band_files:
+            role = detect_band_role(getattr(f, 'name', None))
+            if role is None:
+                continue  # B01 aerosol, B11 SWIR, SCL, unrecognised names -> skip
+            if role in role_to_path:
+                raise RemoteSenseValidationError(
+                    "duplicate band for role '%s' in upload" % role)
+            fd, tmp_path = tempfile.mkstemp(suffix='.tif', dir=settings.MEDIA_TMP)
+            with os.fdopen(fd, 'wb') as out:
+                for chunk in _iter_chunks(f):
+                    out.write(chunk)
+            tmp_paths.append(tmp_path)
+            role_to_path[role] = tmp_path
+
+        if not role_to_path:
+            raise RemoteSenseValidationError(
+                "no recognised Sentinel bands in upload "
+                "(expected B02/B03/B04/B08 in the filenames)")
+
+        fd, stacked_path = tempfile.mkstemp(suffix='_stack.tif', dir=settings.MEDIA_TMP)
+        os.close(fd)
+        try:
+            stack_and_tag_bands(role_to_path, stacked_path)
+        except BandStackError as e:
+            raise RemoteSenseValidationError(str(e))
+
+        task = create_capture_from_orthophoto(
+            project, stacked_path,
+            name=name or ('Sentinel capture (farm %s)' % farm_id),
+            dispatch=dispatch, capture_date=capture_date,
+            source=CaptureMeta.SATELLITE)
+    finally:
+        for p in tmp_paths + ([stacked_path] if stacked_path else []):
+            if p and os.path.exists(p):
+                os.remove(p)
 
     return task

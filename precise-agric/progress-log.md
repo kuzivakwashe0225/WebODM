@@ -477,7 +477,7 @@ masking, historical baselines, retention policy, and the pre-existing AgriField 
 
 ---
 
-## Stage 10 — Sentinel roadmap + Phases 1–4 (2026-08-14 to 2026-08-15) 🚧 Phases 1–4 done
+## Stage 10 — Sentinel roadmap + Phases 1–5 (2026-08-14 to 2026-08-15) 🚧 Phases 1–5 done
 
 **Roadmap.** User pasted an externally-drafted architecture review (not written against this codebase)
 proposing a "multi-source observation platform" direction. Reviewed it skeptically against the actual
@@ -590,5 +590,39 @@ lookup table, plus index-choice and error-translation tests for the comparison p
 same two pre-existing, unrelated failures as every run this session (fifth consecutive confirmation, zero
 new regressions).
 
-**Not done:** Phases 5–6 of the roadmap (observation timeline, historical baselines).
+**Not done (at Phase 4 checkpoint):** Phases 5–6 of the roadmap (observation timeline, historical
+baselines).
+
+**Phase 5 implementation.** Asked the user directly where the observation timeline should live rather
+than guessing between the two options the earlier UX mockup had left open (a new field-scoped tab vs.
+extending the existing whole-farm `season.html` page) — answer: extend `season.html`, timeline as a new
+section below the trend charts, field-selectable via a dropdown.
+
+Before building the "new aggregation endpoint" the roadmap called for, audited what already exists — same
+discipline as Phase 3's cleanup, applied one step earlier this time (before writing code, not after).
+Found that Stage 8's `SeasonalView` (`agri/api/seasonal.py`) already returns almost exactly the data shape
+a timeline needs: per field, a chronological `series` of points across every finished `AnalysisRun`, each
+tagged with date, source (drone/satellite), which engine computed it, and metrics — already keyed so a
+same-day drone + satellite pair never silently overwrites or blends. Building a second endpoint would have
+duplicated that logic for no reason. The one real gap: Phase 1's `valid_pixel_pct` quality metric lived on
+`CaptureMeta` but was never surfaced in `SeasonalView`'s points.
+
+Built: `_capture_valid_pixel_pct()` in `seasonal.py` (mirrors the existing `_capture_source()` pattern),
+added to every point (`None` for drone, the real value for satellite) but deliberately left out of the
+whole-farm average — a quality percentage isn't meaningful averaged across fields, only at the point level
+the timeline reads it at. On the frontend, a new "Observation Timeline" section in `season.html`: a field
+dropdown (reusing the same `/api/agri/seasonal/` response the charts already fetch — no second request)
+and a scrollable, newest-first event list — date, 🚁/🛰️ source icon, headline metric, engine label, and
+for satellite points the same ✓/⚠ 70%-threshold quality badge convention already used on
+`PreciseAgricPanel.jsx`'s comparison card.
+
+**Verified for real:** one new test (`test_seasonal_points_include_valid_pixel_pct_for_satellite`), plus
+the 3 pre-existing seasonal tests re-run to confirm the existing chart data shape didn't change.
+`season.html`'s new JS (Django-template-embedded) was syntax-checked by extracting the script, neutralizing
+its `{% trans %}` tags, and running `node --check` — clean. `./webodm.sh test backend agri.tests` in
+`--dev` mode: 106/107 — the flaky local-NodeODM test happened to pass this run (environmental, not new);
+the one remaining failure is the same pre-existing, unrelated field-link issue confirmed every run this
+session.
+
+**Not done:** Phase 6 of the roadmap (historical baselines & anomaly-driven drone dispatch).
 

@@ -1,13 +1,17 @@
 # Stage 10 — Sentinel Integration Roadmap (post Stage 9 audit)
 
-> **Status (2026-08-15): Phases 1–4 built and test-verified.** `TestSatellitePull` grew from 13 → 24 → 30
-> → 33 tests across Phases 1, 2, 4; Phase 3 added 1 test to `TestAgri` instead (pure refactor, no client
-> surface). Full `agri.tests` re-run after each phase: 94/96, then 100/102, then 101/103, then 104/106 —
-> the two failures throughout are the same pre-existing, unrelated-to-this-work issues already documented
-> in stage-9 §13 (confirmed identical error signatures every time, never new regressions). Three real bugs
-> were found live-testing Phase 1's cloud-masking approach against the real Sentinel Hub API *before* they
-> became silent data-quality bugs — see §3 Phase 1. Phase 4's broader indices worked cleanly on the first
-> live run, no new bugs. Phases 5–6 are still plan-only; each gets its own implementation pass.
+> **Status (2026-08-15): Phases 1–5 built and test-verified.** `TestSatellitePull` grew from 13 → 24 → 30
+> → 33 tests across Phases 1, 2, 4; Phases 3 and 5 each added 1 test to `TestAgri` instead (neither
+> touches the Sentinel client directly). Full `agri.tests` re-run after each phase: 94/96, then 100/102,
+> then 101/103, then 104/106, then 106/107 — the failures throughout are the same pre-existing,
+> unrelated-to-this-work issues already documented in stage-9 §13 (Phase 5's run hit only 1 of the usual
+> 2 — the flaky local-NodeODM test happened to pass this time, consistent with it being environmental, not
+> a new state; confirmed identical error signature on the one that did fail, never a new regression).
+> Three real bugs were found live-testing Phase 1's cloud-masking approach against the real Sentinel Hub
+> API *before* they became silent data-quality bugs — see §3 Phase 1. Phase 4's broader indices worked
+> cleanly on the first live run, no new bugs. Phase 5 found that its planned new endpoint was unnecessary —
+> the Stage 8 `SeasonalView` already did the job, so it was extended by one field instead of duplicated.
+> Phase 6 is still plan-only.
 
 ## 1. Why this document exists
 
@@ -291,18 +295,52 @@ mocked, alongside re-running the 4 pre-existing comparison tests to confirm the 
 unchanged. Real `./webodm.sh test backend agri.tests` run in `--dev` mode: targeted comparison-path tests
 7/7, full suite regression-checked (see status header for the run-by-run count).
 
-### Phase 5 — Observation timeline (field-level, multi-source)
+### Phase 5 — Observation timeline (field-level, multi-source) — ✅ BUILT (2026-08-15)
 
 **Why:** the genuinely good UX idea in the proposal — a field's full capture history (drone *and*
 satellite, interleaved by date) in one view, not scattered per-boundary-per-capture as today.
 
-**What:** a new read endpoint aggregating all `Task`s for a `Field` across every `Capture`
-(`agri/api/`), and a new frontend view rendering it as a timeline: date, source icon, headline metric.
-This is a **real new feature**, not a refactor — scope it as its own implementation pass with its own
-plan when it's time to build it.
+**Placement decision:** the original plan mocked two options — a new field-scoped tab, or extending the
+existing whole-farm season page. Asked the user directly rather than guessing; the answer was **extend
+`season.html`**, with the timeline as a new section below the trend charts, field-selectable via a
+dropdown (not a separate page/tab).
 
-**Depends on:** Phase 1 (quality flag should show in the timeline) and ideally Phase 2 (so an entry can
-distinguish "we chose this scene" from "this was the only option").
+**Audit before building (same discipline as Phase 3's cleanup):** the plan called for "a new read
+endpoint aggregating all Tasks for a Field across every Capture" — but `agri/api/seasonal.py`'s
+`SeasonalView` (built in Stage 8) **already does almost exactly this**: per field, a `series` of points
+across every finished `AnalysisRun`, each carrying `date`, `source` (drone/satellite), `computed_by`
+(our-own/Sentinel), and the run's metrics, already keyed to never silently blend a same-day drone +
+satellite pair. Building a second, parallel aggregation endpoint would have duplicated that logic and
+risked the two disagreeing over time. The only real gap: `valid_pixel_pct` (Stage 10 Phase 1's SCL-derived
+quality metric) was captured on `CaptureMeta` but never surfaced in `SeasonalView`'s points. **No new
+endpoint was built — the existing one was extended by one field.**
+
+**What was built:**
+- `agri/api/seasonal.py`: `_capture_valid_pixel_pct(task)` (mirrors the existing `_capture_source()`
+  pattern) — each point now also carries `valid_pixel_pct` (`None` for drone, the real value for
+  satellite). Not added to `NUMERIC_METRICS`/the whole-farm average — averaging a quality percentage
+  across fields isn't a meaningful farm-level number; the flag matters at the individual-point level the
+  timeline reads it at.
+- `coreplugins/precise_agric/templates/season.html`: a new "Observation Timeline" section — a field
+  `<select>` (populated from the same `/api/agri/seasonal/` response the charts already fetch, no second
+  request) and a scrollable, newest-first list of that field's capture events. Each row: date, a
+  🚁/🛰️ source icon, the headline metric (`index` + `health_mean` when present, falling back to canopy %
+  or weed count), which engine computed it (our own vs. Sentinel's, from `computed_by`), and — for
+  satellite points only — the same ✓/⚠ quality badge convention `PreciseAgricPanel.jsx` already uses
+  (≥70% valid pixels = good), so a cloudy pull is visibly flagged right in the history, not just on the
+  comparison card.
+
+**Files touched:** `agri/api/seasonal.py`, `coreplugins/precise_agric/templates/season.html`,
+`agri/tests.py` (1 new test in `TestAgri`).
+
+**Verification:** `test_seasonal_points_include_valid_pixel_pct_for_satellite` (new) plus the 3
+pre-existing seasonal tests re-run to confirm no regression to the existing chart data shape. Real
+`./webodm.sh test backend agri.tests` run in `--dev` mode: 106/107 — the flaky local-NodeODM test
+happened to pass this run (environmental, not new), and the one remaining failure is the same
+pre-existing, unrelated `test_resolve_agri_field_falls_back_to_persistent_field_link` issue documented
+since stage-9 §13. `season.html`'s new JS was syntax-checked (template tags neutralized, `node --check` on
+the extracted script) but **not exercised in an actual browser** — same gap already flagged for the rest
+of the Stage 9/10 frontend.
 
 ### Phase 6 — Historical baselines & anomaly-driven drone dispatch
 

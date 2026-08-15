@@ -29,9 +29,26 @@
   .pa-season .pa-card .pa-latest { font-size:12px; color:#37474f; margin-bottom:6px; }
   .pa-season .pa-card .pa-latest b { color:#1b5e20; }
   .pa-season canvas { max-height: 240px; }
+  .pa-season .pa-timeline { background:#fff; border:1px solid #e6ece7; border-radius:12px;
+      padding:16px 18px; margin-top: 8px; }
+  .pa-season .pa-timeline-head { display:flex; align-items:center; gap:10px; margin-bottom:12px;
+      flex-wrap:wrap; }
+  .pa-season .pa-timeline-head .ttl { font-weight:700; font-size:16px; }
+  .pa-season .pa-timeline-list { display:flex; flex-direction:column; gap:8px; max-height:360px;
+      overflow-y:auto; }
+  .pa-season .pa-timeline-row { display:flex; align-items:center; gap:10px; padding:8px 10px;
+      border:1px solid #e6ece7; border-radius:8px; font-size:13px; }
+  .pa-season .pa-timeline-row .date { font-weight:700; color:#1b3a2b; min-width:92px; }
+  .pa-season .pa-timeline-row .src { font-size:16px; }
+  .pa-season .pa-timeline-row .metric { flex:1; color:#37474f; }
+  .pa-season .pa-timeline-row .engine { color:#8a998e; font-size:11.5px; }
   @media (prefers-color-scheme: dark){
     .pa-season .pa-card { background:#20261f; border-color:#33402f; }
     .pa-season .pa-card .ttl { color:#e8f0e6; }
+    .pa-season .pa-timeline { background:#20261f; border-color:#33402f; }
+    .pa-season .pa-timeline-row { border-color:#33402f; }
+    .pa-season .pa-timeline-row .date { color:#e8f0e6; }
+    .pa-season .pa-timeline-row .metric { color:#cfe0d1; }
   }
 </style>
 
@@ -64,6 +81,15 @@
   <div id="pa-summary" class="pa-summary" style="display:none;"></div>
   <div id="pa-empty" class="pa-msg" style="display:none;"></div>
   <div id="pa-cards" class="pa-cards" style="display:none;"></div>
+
+  <div id="pa-timeline" class="pa-timeline" style="display:none;">
+    <div class="pa-timeline-head">
+      <span class="ttl"><i class="fa fa-stream"></i> {% trans "Observation Timeline" %}</span>
+      <label for="pa-timeline-select" style="margin:0 0 0 auto; font-weight:normal;">{% trans "Field" %}:</label>
+      <select id="pa-timeline-select" class="form-control" style="width:auto; min-width:200px;"></select>
+    </div>
+    <div id="pa-timeline-list" class="pa-timeline-list"></div>
+  </div>
 </div>
 
 <script>
@@ -137,6 +163,74 @@
     return (data.fields||[]).some(function(f){ return f.series.some(function(p){ return p[key]!=null; }); });
   }
 
+  // --- Observation Timeline (Stage 10 Phase 5) --------------------------
+  // A per-field, chronological list of every capture (drone + satellite,
+  // interleaved) built on the seasonal endpoint's existing per-field series --
+  // the same data the charts above use, just read as events instead of a
+  // trend line. Lives on this page (not a separate field-scoped view) per
+  // product decision.
+
+  function findField(fields, id){
+    for (var i=0;i<fields.length;i++){ if (String(fields[i].id)===String(id)) return fields[i]; }
+    return null;
+  }
+
+  function timelineMetricText(p){
+    if (p.index && p.health_mean != null) return p.index+' '+(Math.round(p.health_mean*1000)/1000);
+    if (p.canopy_pct != null) return '{% trans "Canopy" %} '+Math.round(p.canopy_pct)+'%';
+    if (p.weed_count != null) return '{% trans "Weed count" %}: '+p.weed_count;
+    return '{% trans "No metric recorded" %}';
+  }
+
+  function timelineRow(p){
+    var isSat = p.source === 'SATELLITE';
+    var srcIcon = isSat ? '🛰️' : '🚁';
+    var srcTitle = isSat ? '{% trans "Satellite" %}' : '{% trans "Drone" %}';
+    var engine = p.computed_by === 'SENTINEL' ? '{% trans "Sentinel\'s own analysis" %}' : '{% trans "Precise-Agric analysis" %}';
+    var badge = '';
+    if (isSat && p.valid_pixel_pct != null){
+      var good = p.valid_pixel_pct >= 70;
+      badge = '<span class="pa-badge '+(good?'good':'bad')+'">'+(good?'✓':'⚠')+' '+Math.round(p.valid_pixel_pct)+'% {% trans "valid" %}</span>';
+    }
+    var row = document.createElement('div');
+    row.className = 'pa-timeline-row';
+    row.innerHTML =
+      '<span class="date">'+p.date+'</span>'+
+      '<span class="src" title="'+srcTitle+'">'+srcIcon+'</span>'+
+      '<span class="metric">'+timelineMetricText(p)+' <span class="engine">· '+engine+'</span></span>'+
+      badge;
+    return row;
+  }
+
+  function renderTimeline(data){
+    var wrap = document.getElementById('pa-timeline');
+    var sel = document.getElementById('pa-timeline-select');
+    var list = document.getElementById('pa-timeline-list');
+    var fields = data.fields || [];
+    if (!fields.length){ wrap.style.display='none'; return; }
+    wrap.style.display='block';
+
+    var prev = sel.value;
+    sel.innerHTML = '';
+    fields.forEach(function(f){
+      var o=document.createElement('option'); o.value=f.id; o.textContent=f.name; sel.appendChild(o);
+    });
+    sel.value = findField(fields, prev) ? prev : String(fields[0].id);
+
+    function draw(){
+      var field = findField(fields, sel.value);
+      list.innerHTML = '';
+      if (!field || !field.series.length){
+        list.innerHTML = '<div class="pa-msg" style="padding:16px 0;">{% trans "No captures yet for this field." %}</div>';
+        return;
+      }
+      var sorted = field.series.slice().sort(function(a,b){ return a.date<b.date?1:(a.date>b.date?-1:0); });
+      sorted.forEach(function(p){ list.appendChild(timelineRow(p)); });
+    }
+    sel.onchange = draw;
+    draw();
+  }
+
   function render(data){
     var cards = document.getElementById('pa-cards');
     var summary = document.getElementById('pa-summary');
@@ -149,9 +243,11 @@
       empty.style.display='block';
       empty.innerHTML = '🌱 {% trans "No analyzed captures yet for this farm. Upload orthophotos across the season and approve their analysis to see trends here." %}';
       cards.style.display='none'; summary.style.display='none';
+      document.getElementById('pa-timeline').style.display='none';
       return;
     }
     empty.style.display='none';
+    renderTimeline(data);
 
     // Summary stats
     var dates = (data.farm.series||[]).map(function(p){return p.date;});

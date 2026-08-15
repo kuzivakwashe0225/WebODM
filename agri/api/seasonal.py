@@ -13,6 +13,15 @@ satellite capture on the same date, or our own vs Sentinel's own numbers for
 the same date, are never comparable (different pixel sizes, possibly
 different formulas) and must never silently overwrite or average into each
 other. See precise-agric/stages/stage-9-satellite-monitoring.md §5 / §9.
+
+Each point also carries `valid_pixel_pct` (Stage 10 Phase 5) -- the same
+SCL-derived cloud/quality metric Stage 10 Phase 1 stores on CaptureMeta,
+surfaced here so a per-field observation timeline built on this endpoint's
+existing per-field `series` (this response already IS that timeline's data
+shape; no separate aggregation endpoint was needed -- see
+stage-10-sentinel-roadmap.md Phase 5) can flag a low-quality satellite point
+the same way PreciseAgricPanel.jsx's comparison card already does. None for
+drone points, since there's nothing to flag.
 """
 from rest_framework import permissions
 from rest_framework.response import Response
@@ -41,6 +50,16 @@ def _capture_source(task):
     # No CaptureMeta row means a raw multi-image flight processed by NodeODM --
     # every such Task in this system is, by construction, a drone flight.
     return getattr(cm, 'source', CaptureMeta.DRONE)
+
+
+def _capture_valid_pixel_pct(task):
+    # Stage 10 Phase 5 observation timeline: surfaces the SCL-derived cloud/
+    # quality metric (Stage 10 Phase 1, agri/remote_sense/sentinel_client.py)
+    # alongside each point so a low-quality satellite pull can be flagged in the
+    # timeline the same way it already is on the "Compare with Satellite" card
+    # (PreciseAgricPanel.jsx). None for drone captures -- there's nothing to flag.
+    cm = getattr(task, 'capture_meta', None)
+    return getattr(cm, 'valid_pixel_pct', None)
 
 
 def _run_metrics(run):
@@ -105,7 +124,8 @@ class SeasonalView(APIView):
             date_str = _capture_date(run.task).isoformat()
             source = _capture_source(run.task)
             computed_by = run.computed_by
-            point = {'date': date_str, 'source': source, 'computed_by': computed_by}
+            point = {'date': date_str, 'source': source, 'computed_by': computed_by,
+                     'valid_pixel_pct': _capture_valid_pixel_pct(run.task)}
             point.update(_run_metrics(run))
             entry['points'][(date_str, source, computed_by)] = point
 

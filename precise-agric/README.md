@@ -30,9 +30,9 @@ entirely on WebODM's own stack.
 | 7 | AgriTrack mobile app integration (farm sync in, results push out) | ✅ Backend done, 🚧 live end-to-end unconfirmed — see [stage-7](stages/stage-7-agritrack-integration.md) |
 | 8 | Interactive map (persistent clickable fields, plant-health heatmap, grid zone popups) + seasonal progress graphs | ✅ Done — see [stage-8](stages/stage-8-interactive-map-and-seasonal.md) |
 | 9 | Sentinel satellite monitoring (source tagging, direct Copernicus/Sentinel Hub connection, on-demand "Get from Sentinel" imagery + comparison flow) | ✅ Backend built & test-verified; 🚧 frontend built, not browser-tested — see [stage-9](stages/stage-9-satellite-monitoring.md) |
-| 10 | Sentinel roadmap (6 phases) + Phases 1–4 (cloud/quality awareness, field-level targeting, Import-menu entry point, scene-availability picker, satellite eligibility table, broader Sentinel indices) | ✅ Phases 1–4 built & test-verified; 🚧 Phases 5–6 plan-only — see [stage-10](stages/stage-10-sentinel-roadmap.md) |
+| 10 | Sentinel roadmap (6 phases) + Phases 1–5 (cloud/quality awareness, field-level targeting, Import-menu entry point, scene-availability picker, satellite eligibility table, broader Sentinel indices, observation timeline) | ✅ Phases 1–5 built & test-verified; 🚧 Phase 6 plan-only — see [stage-10](stages/stage-10-sentinel-roadmap.md) |
 
-**106 tests in `agri/tests.py`, 104 green** as of 2026-08-15 (includes 21 new Stage 10 Phase 1–4 tests,
+**107 tests in `agri/tests.py`, 106 green** as of 2026-08-15 (includes 22 new Stage 10 Phase 1–5 tests,
 real `./webodm.sh test backend agri.tests` run in `--dev` mode). The two failures are pre-existing and
 unrelated to Stages 9/10 (`test_resolve_agri_field_falls_back_to_persistent_field_link` and a flaky local
 NodeODM-startup test) — see [stage-9 §13](stages/stage-9-satellite-monitoring.md) for root cause.

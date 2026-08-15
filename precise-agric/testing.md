@@ -276,6 +276,35 @@ Not wired into the API/Celery/frontend yet — `SatelliteComparisonPullView` sti
 "Compare with Satellite" UI is separate, deferred frontend work (this phase was explicitly build-ahead-of-
 demand, not a requested feature).
 
+### Stage 10 Phase 5 — Observation timeline (`TestAgri`, extended)
+
+A per-field, multi-source (drone + satellite) capture history, added as a new section on the existing
+whole-farm `season.html` page (user's explicit placement choice over a separate field-scoped tab), per
+[stage-10-sentinel-roadmap.md](stages/stage-10-sentinel-roadmap.md) Phase 5. An audit before building
+found the planned "new aggregation endpoint" was unnecessary — Stage 8's `SeasonalView` already returns
+per-field, per-capture series data; the only real gap was the Phase 1 quality metric never being surfaced
+there.
+
+| Test | Verifies |
+|---|---|
+| `test_seasonal_points_include_valid_pixel_pct_for_satellite` | `SeasonalView`'s points now carry `valid_pixel_pct` — `None` for a drone point, the real `CaptureMeta` value for a satellite point on the same field |
+
+The 3 pre-existing seasonal tests (`test_seasonal_series_per_field_and_farm`,
+`test_seasonal_same_date_drone_and_satellite_dont_overwrite`,
+`test_seasonal_excludes_boundaries_without_field`) were re-run unmodified to confirm the existing chart
+data shape didn't change.
+
+**Result (2026-08-15): 106/107 green.** The flaky local-NodeODM test
+(`test_raw_image_task_flows_through_boundary_and_analysis`) happened to pass this run — consistent with
+it being environmental, not a new state. The one remaining failure is the same pre-existing, unrelated
+`test_resolve_agri_field_falls_back_to_persistent_field_link` issue documented since stage-9 §13 (same
+error signature, confirmed again).
+
+`season.html`'s new "Observation Timeline" section (JS embedded in the Django template) was
+syntax-checked by extracting the script, neutralizing its `{% trans %}` tags, and running `node --check`
+on the result — but it is **not** exercised in an actual browser, same gap flagged for the rest of the
+Stage 9/10 frontend.
+
 ## Manual testing
 Step-by-step (rebrand visual checks + Boundary API via curl / browsable API / admin) is in
 [manual-testing.md](manual-testing.md).

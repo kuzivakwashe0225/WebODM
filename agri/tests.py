@@ -980,6 +980,34 @@ class TestAgri(BootTestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data["fields"], [])
 
+    def test_seasonal_points_include_valid_pixel_pct_for_satellite(self):
+        # Stage 10 Phase 5: the observation timeline is built directly on this
+        # endpoint's existing per-field series, so the quality flag Phase 1
+        # stores on CaptureMeta must be surfaced here too -- None for drone
+        # points (nothing to flag), the real value for satellite points.
+        from agri.models import Field, CaptureMeta, AnalysisRun
+        field = Field.objects.create(project=self.project, name="Quality Field")
+        drone_task, _b1, _r1 = self._analyzed_run(field=field, name="Drone Quality Cap")
+
+        sat_task = self._completed_capture_with_source("Satellite Quality Cap", CaptureMeta.SATELLITE)
+        CaptureMeta.objects.filter(task=sat_task).update(valid_pixel_pct=62.5)
+        sat_boundary = Boundary.objects.create(task=sat_task, geom=sat_task.orthophoto_extent,
+                                               status=Boundary.APPROVED, created_by=self.user,
+                                               field=field)
+        sat_run = AnalysisRun.objects.create(task=sat_task, boundary=sat_boundary,
+                                             triggered_by=self.user)
+        from agri.services import execute_analysis
+        execute_analysis(sat_run)
+
+        client = APIClient()
+        client.login(username="testuser", password="test1234")
+        res = client.get("/api/agri/seasonal/?project=%s" % self.project.id)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        series = res.data["fields"][0]["series"]
+        by_source = {p["source"]: p for p in series}
+        self.assertIsNone(by_source[CaptureMeta.DRONE]["valid_pixel_pct"])
+        self.assertEqual(by_source[CaptureMeta.SATELLITE]["valid_pixel_pct"], 62.5)
 
 
 class TestAgriRawImageCapture(BootTransactionTestCase):

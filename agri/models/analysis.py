@@ -25,24 +25,12 @@ class AnalysisRun(models.Model):
         (FAILED, _('Failed')),
     )
 
-    WEBODM = 'WEBODM'
-    SENTINEL = 'SENTINEL'
-    COMPUTED_BY_CHOICES = (
-        (WEBODM, _('Precise-Agric (WebODM)')),
-        (SENTINEL, _('Sentinel remote-sense engine')),
-    )
-
     task = models.ForeignKey('app.Task', on_delete=models.CASCADE, related_name='analysis_runs',
                              verbose_name=_("Capture"))
     boundary = models.ForeignKey('agri.Boundary', on_delete=models.CASCADE,
                                  related_name='analysis_runs')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=PENDING,
                               verbose_name=_("Status"))
-    computed_by = models.CharField(max_length=16, choices=COMPUTED_BY_CHOICES, default=WEBODM,
-                                   verbose_name=_("Computed by"),
-                                   help_text=_("Which engine produced these results -- our own analysis "
-                                               "fan-out, or numbers submitted by Sentinel's own engine "
-                                               "for comparison (see stage-9-satellite-monitoring.md §9)"))
     index_used = models.CharField(max_length=32, blank=True, default='',
                                   help_text=_("Vegetation index used (e.g. NDVI, ExG)"))
     triggered_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,

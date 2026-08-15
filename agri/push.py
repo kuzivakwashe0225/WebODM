@@ -44,8 +44,8 @@ def push_analysis(run, timeout=10):
     non-AgriTrack boundaries, which have no farmId/fieldId to report.
     Returns True if delivered, False if disabled/not applicable.
     """
-    from agri.agritrack.results import resolve_agri_field, push_orthophoto_results
-    if resolve_agri_field(run.boundary) is not None:
+    if run.boundary.agri_field_id is not None:
+        from agri.agritrack.results import push_orthophoto_results
         return push_orthophoto_results(run, timeout=timeout)
 
     url = getattr(settings, 'AGRITRACK_PUSH_URL', None)

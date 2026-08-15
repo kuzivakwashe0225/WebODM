@@ -29,30 +29,9 @@
   .pa-season .pa-card .pa-latest { font-size:12px; color:#37474f; margin-bottom:6px; }
   .pa-season .pa-card .pa-latest b { color:#1b5e20; }
   .pa-season canvas { max-height: 240px; }
-  .pa-season .pa-timeline { background:#fff; border:1px solid #e6ece7; border-radius:12px;
-      padding:16px 18px; margin-top: 8px; }
-  .pa-season .pa-timeline-head { display:flex; align-items:center; gap:10px; margin-bottom:12px;
-      flex-wrap:wrap; }
-  .pa-season .pa-timeline-head .ttl { font-weight:700; font-size:16px; }
-  .pa-season .pa-timeline-list { display:flex; flex-direction:column; gap:8px; max-height:360px;
-      overflow-y:auto; }
-  .pa-season .pa-timeline-row { display:flex; flex-direction:column; gap:6px; padding:8px 10px;
-      border:1px solid #e6ece7; border-radius:8px; font-size:13px; }
-  .pa-season .pa-timeline-row .pa-timeline-main { display:flex; align-items:center; gap:10px; }
-  .pa-season .pa-timeline-row .date { font-weight:700; color:#1b3a2b; min-width:92px; }
-  .pa-season .pa-timeline-row .src { font-size:16px; }
-  .pa-season .pa-timeline-row .metric { flex:1; color:#37474f; }
-  .pa-season .pa-timeline-row .engine { color:#8a998e; font-size:11.5px; }
-  .pa-season .pa-timeline-row .anomaly { background:#fdecea; color:#b3261e; border-radius:6px;
-      padding:6px 9px; font-size:12px; line-height:1.4; }
   @media (prefers-color-scheme: dark){
     .pa-season .pa-card { background:#20261f; border-color:#33402f; }
     .pa-season .pa-card .ttl { color:#e8f0e6; }
-    .pa-season .pa-timeline { background:#20261f; border-color:#33402f; }
-    .pa-season .pa-timeline-row .anomaly { background:#3a1f1d; color:#f2b8b5; }
-    .pa-season .pa-timeline-row { border-color:#33402f; }
-    .pa-season .pa-timeline-row .date { color:#e8f0e6; }
-    .pa-season .pa-timeline-row .metric { color:#cfe0d1; }
   }
 </style>
 
@@ -70,30 +49,9 @@
     </select>
   </div>
 
-  <div class="pa-controls" id="pa-sat-pull" style="display:none;">
-    <label for="pa-sat-from" style="margin:0;"><i class="fa fa-satellite"></i> {% trans "Satellite imagery" %}:</label>
-    <label for="pa-sat-from" style="margin:0; font-weight:normal;">{% trans "From" %}</label>
-    <input type="date" id="pa-sat-from" class="form-control" style="width:auto;">
-    <label for="pa-sat-to" style="margin:0; font-weight:normal;">{% trans "To" %}</label>
-    <input type="date" id="pa-sat-to" class="form-control" style="width:auto;">
-    <button id="pa-sat-btn" class="btn btn-sm" style="background:#1565c0; color:#fff;" onclick="paRequestSatelliteImagery()">
-      <i class="fa fa-cloud-download-alt"></i> {% trans "Get Satellite Imagery" %}
-    </button>
-  </div>
-  <div id="pa-sat-status" class="pa-msg" style="display:none; padding:8px 0;"></div>
-
   <div id="pa-summary" class="pa-summary" style="display:none;"></div>
   <div id="pa-empty" class="pa-msg" style="display:none;"></div>
   <div id="pa-cards" class="pa-cards" style="display:none;"></div>
-
-  <div id="pa-timeline" class="pa-timeline" style="display:none;">
-    <div class="pa-timeline-head">
-      <span class="ttl"><i class="fa fa-stream"></i> {% trans "Observation Timeline" %}</span>
-      <label for="pa-timeline-select" style="margin:0 0 0 auto; font-weight:normal;">{% trans "Field" %}:</label>
-      <select id="pa-timeline-select" class="form-control" style="width:auto; min-width:200px;"></select>
-    </div>
-    <div id="pa-timeline-list" class="pa-timeline-list"></div>
-  </div>
 </div>
 
 <script>
@@ -167,82 +125,6 @@
     return (data.fields||[]).some(function(f){ return f.series.some(function(p){ return p[key]!=null; }); });
   }
 
-  // --- Observation Timeline (Stage 10 Phase 5) --------------------------
-  // A per-field, chronological list of every capture (drone + satellite,
-  // interleaved) built on the seasonal endpoint's existing per-field series --
-  // the same data the charts above use, just read as events instead of a
-  // trend line. Lives on this page (not a separate field-scoped view) per
-  // product decision.
-
-  function findField(fields, id){
-    for (var i=0;i<fields.length;i++){ if (String(fields[i].id)===String(id)) return fields[i]; }
-    return null;
-  }
-
-  function timelineMetricText(p){
-    if (p.index && p.health_mean != null) return p.index+' '+(Math.round(p.health_mean*1000)/1000);
-    if (p.canopy_pct != null) return '{% trans "Canopy" %} '+Math.round(p.canopy_pct)+'%';
-    if (p.weed_count != null) return '{% trans "Weed count" %}: '+p.weed_count;
-    return '{% trans "No metric recorded" %}';
-  }
-
-  function timelineRow(p){
-    var isSat = p.source === 'SATELLITE';
-    var srcIcon = isSat ? '🛰️' : '🚁';
-    var srcTitle = isSat ? '{% trans "Satellite" %}' : '{% trans "Drone" %}';
-    var engine = p.computed_by === 'SENTINEL' ? '{% trans "Sentinel\'s own analysis" %}' : '{% trans "Precise-Agric analysis" %}';
-    var badge = '';
-    if (isSat && p.valid_pixel_pct != null){
-      var good = p.valid_pixel_pct >= 70;
-      badge = '<span class="pa-badge '+(good?'good':'bad')+'">'+(good?'✓':'⚠')+' '+Math.round(p.valid_pixel_pct)+'% {% trans "valid" %}</span>';
-    }
-    var anomaly = '';
-    if (p.anomaly){
-      var pct = Math.round(Math.abs(p.anomaly.deviation_pct));
-      anomaly = '<div class="anomaly">⚠ '+pct+'% {% trans "below this field\'s own trailing average" %} '+
-        '({% trans "was" %} '+p.anomaly.trailing_avg+') — {% trans "consider a drone follow-up" %}</div>';
-    }
-    var row = document.createElement('div');
-    row.className = 'pa-timeline-row';
-    row.innerHTML =
-      '<div class="pa-timeline-main">'+
-        '<span class="date">'+p.date+'</span>'+
-        '<span class="src" title="'+srcTitle+'">'+srcIcon+'</span>'+
-        '<span class="metric">'+timelineMetricText(p)+' <span class="engine">· '+engine+'</span></span>'+
-        badge+
-      '</div>'+anomaly;
-    return row;
-  }
-
-  function renderTimeline(data){
-    var wrap = document.getElementById('pa-timeline');
-    var sel = document.getElementById('pa-timeline-select');
-    var list = document.getElementById('pa-timeline-list');
-    var fields = data.fields || [];
-    if (!fields.length){ wrap.style.display='none'; return; }
-    wrap.style.display='block';
-
-    var prev = sel.value;
-    sel.innerHTML = '';
-    fields.forEach(function(f){
-      var o=document.createElement('option'); o.value=f.id; o.textContent=f.name; sel.appendChild(o);
-    });
-    sel.value = findField(fields, prev) ? prev : String(fields[0].id);
-
-    function draw(){
-      var field = findField(fields, sel.value);
-      list.innerHTML = '';
-      if (!field || !field.series.length){
-        list.innerHTML = '<div class="pa-msg" style="padding:16px 0;">{% trans "No captures yet for this field." %}</div>';
-        return;
-      }
-      var sorted = field.series.slice().sort(function(a,b){ return a.date<b.date?1:(a.date>b.date?-1:0); });
-      sorted.forEach(function(p){ list.appendChild(timelineRow(p)); });
-    }
-    sel.onchange = draw;
-    draw();
-  }
-
   function render(data){
     var cards = document.getElementById('pa-cards');
     var summary = document.getElementById('pa-summary');
@@ -255,11 +137,9 @@
       empty.style.display='block';
       empty.innerHTML = '🌱 {% trans "No analyzed captures yet for this farm. Upload orthophotos across the season and approve their analysis to see trends here." %}';
       cards.style.display='none'; summary.style.display='none';
-      document.getElementById('pa-timeline').style.display='none';
       return;
     }
     empty.style.display='none';
-    renderTimeline(data);
 
     // Summary stats
     var dates = (data.farm.series||[]).map(function(p){return p.date;});
@@ -323,79 +203,12 @@
         projects.forEach(function(p){
           var o=document.createElement('option'); o.value=p.id; o.textContent=p.name; sel.appendChild(o);
         });
-        sel.onchange=function(){ loadSeasonal(sel.value); updateSatPullVisibility(); };
+        sel.onchange=function(){ loadSeasonal(sel.value); };
         if (projects.length===1){ sel.value=projects[0].id; loadSeasonal(projects[0].id); }
-        updateSatPullVisibility();
       })
       .catch(function(){ sel.innerHTML='<option value="">{% trans "Could not load farms" %}</option>'; });
   }
 
-  // --- On-demand satellite imagery pull -----------------------------------
-  // The user only ever picks a date range: the area comes straight from this
-  // farm's own onboarded boundary (agri/remote_sense/sentinel_pull.py), so
-  // there is nothing else to configure here.
-
-  function fmtDate(d){ return d.toISOString().slice(0,10); }
-
-  function setDefaultSatDates(){
-    var to = new Date();
-    var from = new Date(); from.setDate(from.getDate() - 30);
-    document.getElementById('pa-sat-from').value = fmtDate(from);
-    document.getElementById('pa-sat-to').value = fmtDate(to);
-  }
-
-  function updateSatPullVisibility(){
-    var pid = document.getElementById('pa-farm').value;
-    var pull = document.getElementById('pa-sat-pull');
-    pull.style.display = pid ? 'flex' : 'none';
-  }
-
-  function pollSatelliteTask(celeryTaskId, onDone){
-    jQuery.ajax({type:'GET', url:'/api/workers/check/'+celeryTaskId}).done(function(result){
-      if (result.error){ onDone(result.error); }
-      else if (result.ready){ onDone(null); }
-      else { setTimeout(function(){ pollSatelliteTask(celeryTaskId, onDone); }, 3000); }
-    }).fail(function(){ setTimeout(function(){ pollSatelliteTask(celeryTaskId, onDone); }, 3000); });
-  }
-
-  window.paRequestSatelliteImagery = function(){
-    var pid = document.getElementById('pa-farm').value;
-    var from = document.getElementById('pa-sat-from').value;
-    var to = document.getElementById('pa-sat-to').value;
-    var btn = document.getElementById('pa-sat-btn');
-    var statusEl = document.getElementById('pa-sat-status');
-    if (!pid || !from || !to) return;
-    if (from > to){
-      statusEl.style.display='block';
-      statusEl.innerHTML = '⚠️ {% trans "The start date must be before the end date." %}';
-      return;
-    }
-
-    btn.disabled = true;
-    statusEl.style.display = 'block';
-    statusEl.innerHTML = '<i class="fa fa-circle-notch fa-spin"></i> ' +
-      '{% trans "Requesting satellite imagery for this farm… this can take a minute." %}';
-
-    jQuery.ajax({
-      type: 'POST', url: '/api/agri/satellite/imagery/', contentType: 'application/json',
-      data: JSON.stringify({project: pid, date_from: from, date_to: to})
-    }).done(function(res){
-      pollSatelliteTask(res.celery_task_id, function(err){
-        btn.disabled = false;
-        if (err){
-          statusEl.innerHTML = '⚠️ ' + err;
-        }else{
-          statusEl.innerHTML = '✅ {% trans "Satellite imagery added to this farm. Open its map view to review and approve the field boundary, then run analysis." %}';
-        }
-      });
-    }).fail(function(xhr){
-      btn.disabled = false;
-      var detail = (xhr.responseJSON && xhr.responseJSON.detail) || xhr.statusText;
-      statusEl.innerHTML = '⚠️ ' + detail;
-    });
-  };
-
-  setDefaultSatDates();
   loadFarms();
 })();
 </script>

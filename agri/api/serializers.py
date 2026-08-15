@@ -51,11 +51,11 @@ class AnalysisRunSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = AnalysisRun
-        fields = ('id', 'task', 'boundary', 'status', 'computed_by', 'index_used', 'triggered_by',
+        fields = ('id', 'task', 'boundary', 'status', 'index_used', 'triggered_by',
                   'reviewed_by', 'error', 'created_at', 'completed_at', 'results',
                   'plant_health_tile_url')
-        read_only_fields = ('task', 'status', 'computed_by', 'index_used', 'triggered_by',
-                            'reviewed_by', 'error', 'created_at', 'completed_at', 'results')
+        read_only_fields = ('task', 'status', 'index_used', 'triggered_by', 'reviewed_by',
+                            'error', 'created_at', 'completed_at', 'results')
 
     def get_plant_health_tile_url(self, run):
         from agri.tiles import plant_health_tile_url

@@ -78,22 +78,16 @@ export default class PreciseAgricPanel extends React.Component{
             .done(boundaries => {
                 this.props.app.syncBoundaries(boundaries);
                 $.getJSON(ANALYSIS_URL).done(runs => {
-                    // Two runs can now exist per boundary: our own analysis, and a
-                    // satellite reference run for comparison (Stage 9). Keep the most
-                    // recent of each (results are already newest-first per
-                    // AnalysisRun.Meta.ordering), keyed separately so both can be
-                    // shown side by side without one hiding the other.
                     const runsByBoundary = {};
                     runs.forEach(run => {
-                        if (String(run.task) !== String(this.props.task.id)) return;
-                        const entry = runsByBoundary[run.boundary] || {};
-                        const key = run.computed_by === "SENTINEL" ? "satellite" : "webodm";
-                        if (entry[key] === undefined) entry[key] = run;
-                        runsByBoundary[run.boundary] = entry;
+                        if (String(run.task) === String(this.props.task.id) &&
+                            runsByBoundary[run.boundary] === undefined){
+                            runsByBoundary[run.boundary] = run;
+                        }
                     });
                     this.setState({boundaries, runsByBoundary, loading: false});
                     Object.keys(runsByBoundary).forEach(bId => {
-                        const run = runsByBoundary[bId].webodm;
+                        const run = runsByBoundary[bId];
                         if (run && (run.status === "PENDING" || run.status === "RUNNING")){
                             this.schedulePoll(run.id);
                         }
@@ -112,12 +106,7 @@ export default class PreciseAgricPanel extends React.Component{
     pollRun = (runId) => {
         delete this.pollTimers[runId];
         $.getJSON(`${ANALYSIS_URL}${runId}/`).done(run => {
-            // Only ever polls our own (webodm) runs -- satellite comparison runs
-            // are created already PENDING_REVIEW and never scheduled for polling.
-            // Merge into the existing {webodm, satellite} entry rather than
-            // replacing it, so a satellite run already loaded isn't dropped.
-            this.setState(prev => ({runsByBoundary: {...prev.runsByBoundary,
-                [run.boundary]: {...prev.runsByBoundary[run.boundary], webodm: run}}}));
+            this.setState(prev => ({runsByBoundary: {...prev.runsByBoundary, [run.boundary]: run}}));
             if (run.status === "PENDING" || run.status === "RUNNING") this.schedulePoll(runId);
         }).fail(() => this.schedulePoll(runId));
     }
@@ -129,10 +118,7 @@ export default class PreciseAgricPanel extends React.Component{
         if (!opts.skipMap) this.props.app.selectBoundary(id);
     }
 
-    latestRun = (boundaryId) => {
-        const entry = this.state.runsByBoundary[boundaryId];
-        return entry && entry.webodm;
-    }
+    latestRun = (boundaryId) => this.state.runsByBoundary[boundaryId];
 
     toggleBoundariesVisible = () => {
         const visible = !this.state.boundariesVisible;
@@ -234,8 +220,7 @@ export default class PreciseAgricPanel extends React.Component{
             data: JSON.stringify({boundary: boundary.id})})
         .done(run => {
             this.setState(prev => ({busyBoundaryId: null,
-                runsByBoundary: {...prev.runsByBoundary,
-                    [boundary.id]: {...prev.runsByBoundary[boundary.id], webodm: run}}}));
+                runsByBoundary: {...prev.runsByBoundary, [boundary.id]: run}}));
             this.schedulePoll(run.id);
         }).fail(xhr => this.setState({busyBoundaryId: null,
             error: this.describeError(xhr, _("Could not start analysis"))}));
@@ -244,36 +229,10 @@ export default class PreciseAgricPanel extends React.Component{
     handleReviewRun = (run, action) => {
         this.setState({busyBoundaryId: run.boundary, error: ""});
         $.ajax({type: 'POST', url: `${ANALYSIS_URL}${run.id}/${action}/`})
-            .done(updatedRun => {
-                const key = updatedRun.computed_by === "SENTINEL" ? "satellite" : "webodm";
-                this.setState(prev => ({busyBoundaryId: null,
-                    runsByBoundary: {...prev.runsByBoundary,
-                        [updatedRun.boundary]: {...prev.runsByBoundary[updatedRun.boundary], [key]: updatedRun}}}));
-            })
+            .done(updatedRun => this.setState(prev => ({busyBoundaryId: null,
+                runsByBoundary: {...prev.runsByBoundary, [updatedRun.boundary]: updatedRun}})))
             .fail(xhr => this.setState({busyBoundaryId: null,
                 error: this.describeError(xhr, _("Could not update analysis"))}));
-    }
-
-    handleCompareSatellite = (boundary) => {
-        this.setState({busyBoundaryId: boundary.id, error: ""});
-        $.ajax({type: 'POST', url: '/api/agri/satellite/compare/', contentType: 'application/json',
-                data: JSON.stringify({boundary: boundary.id})})
-            .done(res => this.pollSatelliteCompare(res.celery_task_id))
-            .fail(xhr => this.setState({busyBoundaryId: null,
-                error: this.describeError(xhr, _("Could not request satellite comparison"))}));
-    }
-
-    pollSatelliteCompare = (celeryTaskId) => {
-        $.getJSON(`/api/workers/check/${celeryTaskId}`).done(result => {
-            if (result.error){
-                this.setState({busyBoundaryId: null, error: result.error});
-            }else if (result.ready){
-                this.setState({busyBoundaryId: null});
-                this.refresh();
-            }else{
-                setTimeout(() => this.pollSatelliteCompare(celeryTaskId), 3000);
-            }
-        }).fail(() => setTimeout(() => this.pollSatelliteCompare(celeryTaskId), 3000));
     }
 
     describeError(xhr, fallback){
@@ -350,75 +309,9 @@ export default class PreciseAgricPanel extends React.Component{
         </div>);
     }
 
-    // Flag, don't block (stage-10-sentinel-roadmap.md Phase 1): a cloudy pull
-    // still shows -- it just says so honestly, rather than presenting a
-    // cloud-contaminated number with the same confidence as a clean one. 70% is
-    // a deliberately simple, round cutoff: more than 30% cloud/shadow
-    // contamination is a meaningfully degraded whole-field sample.
-    renderQualityBadge(validPixelPct){
-        if (validPixelPct === undefined || validPixelPct === null) return null;
-        const good = validPixelPct >= 70;
-        return (<span className={"quality-badge " + (good ? "good" : "warn")}>
-            <i className={"fa " + (good ? "fa-check" : "fa-exclamation-triangle")}></i>
-            {" "}{validPixelPct}% {_("clear")}{good ? "" : " — " + _("low confidence")}
-        </span>);
-    }
-
-    // A second, independently-sourced index for the same field/date, fetched on
-    // request (never automatically) so it can be compared against our own
-    // analysis above. Deliberately just displays both numbers side by side --
-    // no automatic flagging or reconciliation (that's left to the reviewer).
-    renderSatelliteComparison(boundary, webodmRun, satelliteRun){
-        const busy = this.state.busyBoundaryId === boundary.id;
-
-        if (!satelliteRun){
-            if (boundary.status !== "APPROVED") return null;
-            return (<div className="satellite-compare">
-                <button className="btn btn-sm btn-default" disabled={busy}
-                        onClick={() => this.handleCompareSatellite(boundary)}>
-                    {busy ? <i className="fa fa-circle-notch fa-spin"></i> : <i className="fa fa-satellite"></i>}
-                    {" "}{_("Compare with Satellite")}
-                </button>
-            </div>);
-        }
-
-        const result = (satelliteRun.results || [])[0];
-        const stats = result && result.stats;
-        const satMean = stats && stats.mean;
-        const ownResult = webodmRun && (webodmRun.results || []).find(r => r.kind === "plant_health");
-        const ownMean = ownResult && ownResult.stats && ownResult.stats.mean;
-        const validPixelPct = stats && stats.valid_pixel_pct;
-
-        return (<div className="satellite-compare">
-            <div className="satellite-compare-head">
-                <i className="fa fa-satellite"></i> {_("Satellite Reference")}
-                {stats && stats.reference_date ? <span className="ref-date"> ({stats.reference_date})</span> : null}
-                {this.renderQualityBadge(validPixelPct)}
-            </div>
-            {satMean !== undefined && satMean !== null ? (
-                <div className="satellite-compare-values">
-                    <span className="val sat">{_("Satellite")}: <b>{Number(satMean).toFixed(3)}</b> {stats.index || ""}</span>
-                    {ownMean !== undefined && ownMean !== null ?
-                        <span className="val own">{_("Your analysis")}: <b>{Number(ownMean).toFixed(3)}</b> {webodmRun.index_used || ""}</span>
-                        : null}
-                </div>
-            ) : null}
-            {satelliteRun.status === "PENDING_REVIEW" ? (<div className="review-actions">
-                <button className="btn btn-sm btn-primary" onClick={() => this.handleReviewRun(satelliteRun, "approve")}>
-                    <i className="fa fa-check"></i> {_("Acknowledge")}
-                </button>
-                <button className="btn btn-sm btn-default" onClick={() => this.handleReviewRun(satelliteRun, "reject")}>
-                    <i className="fa fa-times"></i> {_("Dismiss")}
-                </button>
-            </div>) : null}
-        </div>);
-    }
-
     renderBoundary(b){
         const { runsByBoundary, busyBoundaryId, selectedId } = this.state;
-        const entry = runsByBoundary[b.id] || {};
-        const run = entry.webodm;
-        const satelliteRun = entry.satellite;
+        const run = runsByBoundary[b.id];
         const busy = busyBoundaryId === b.id;
         const selected = selectedId === b.id;
 
@@ -452,7 +345,6 @@ export default class PreciseAgricPanel extends React.Component{
             </div>) : null}
 
             <div onClick={e => e.stopPropagation()}>{run ? this.renderRunSummary(b, run) : null}</div>
-            <div onClick={e => e.stopPropagation()}>{this.renderSatelliteComparison(b, run, satelliteRun)}</div>
         </div>);
     }
 

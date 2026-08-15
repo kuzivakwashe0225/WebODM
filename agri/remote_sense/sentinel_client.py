@@ -16,10 +16,11 @@ Three capabilities, matching the things precise-agric needs from Sentinel:
   - fetch_field_imagery(): pulls one already-combined, reflectance-scaled,
     band-tagged multi-band GeoTIFF for a field/date via the Process API. Feeds
     straight into agri.capture.create_capture_from_orthophoto(source=SATELLITE).
-  - fetch_field_statistics(): pulls Sentinel's OWN computed NDVI (their engine,
-    not ours) per acquisition date over a range, via the Statistical API -- no
-    image download needed. This is the "Sentinel's own analysis engine" data
-    source for the WebODM-vs-Sentinel comparison (stage-9 §9).
+  - fetch_field_statistics(): pulls Sentinel's OWN computed vegetation index
+    (their engine, not ours; NDVI/GNDVI/NDRE/SAVI/EVI -- see SENTINEL_INDEX_DEFS)
+    per acquisition date over a range, via the Statistical API -- no image
+    download needed. This is the "Sentinel's own analysis engine" data source
+    for the WebODM-vs-Sentinel comparison (stage-9 §9).
   - search_available_scenes(): lists actual available scenes (date + cloud%) via
     the Catalog API, so a user can see real options instead of blindly trusting
     fetch_field_imagery()'s automatic least-cloudy pick
@@ -72,6 +73,18 @@ way) -- used the redefined one anyway for consistency with the rest of this
 module rather than relying on an unverified assumption for other accounts.
 Confirmed response shape: properties.datetime (ISO timestamp) and
 properties.eo:cloud_cover (float 0-100).
+
+BROADER INDICES (2026-08-15, Stage 10 Phase 4) -- fetch_field_statistics() no
+longer hardcodes NDVI's formula; SENTINEL_INDEX_DEFS/_index_definition()
+parametrize the evalscript by index name (NDVI/GNDVI/NDRE reuse Sentinel Hub's
+index() helper; EVI/SAVI are written out directly, matching this codebase's own
+drone-side formulas in app/api/formulas.py band-for-band). All 5 were
+live-tested against the real CDSE account for the same AOI/date-range used in
+Phase 1 -- all 5 returned 6 points each with plausible means (NDVI ~0.29,
+matching Phase 1's original NDVI result exactly, confirming no regression;
+GNDVI ~0.44, NDRE ~0.18, SAVI ~0.18, EVI ~0.17) and no evalscript errors. No new
+bugs found this time -- the parametrization approach worked cleanly on the
+first live run.
 """
 import os
 
@@ -90,6 +103,39 @@ SENTINEL_TOKEN_BY_ROLE = {'red': 'B04', 'green': 'B03', 'blue': 'B02',
 # standard cloud-exclusion set (8, 9, 10) this extends conservatively.
 SCL_VALID_CLASSES = {4, 5, 6, 11}
 SCL_EXCLUDED_CLASSES = {0, 1, 2, 3, 7, 8, 9, 10}
+
+# Indices fetch_field_statistics() can ask Sentinel Hub's Statistical API to
+# compute (Stage 10 Phase 4). Formulas and band roles mirror this codebase's own
+# drone-side algos (app/api/formulas.py's N/R/G/B/Re shorthand -> Sentinel-2
+# B08/B04/B03/B02/B05) so a Sentinel value is comparable to our own analysis for
+# the same index, not just a different index that happens to also be a ratio.
+# NDVI/GNDVI/NDRE reuse Sentinel Hub's built-in index() helper (normalized
+# difference); EVI/SAVI don't fit that shape and are written out directly.
+SENTINEL_INDEX_DEFS = {
+    'NDVI': {'bands': ('B04', 'B08'), 'formula': 'index(samples.B08, samples.B04)'},
+    'GNDVI': {'bands': ('B03', 'B08'), 'formula': 'index(samples.B08, samples.B03)'},
+    'NDRE': {'bands': ('B05', 'B08'), 'formula': 'index(samples.B08, samples.B05)'},
+    'SAVI': {'bands': ('B04', 'B08'),
+             'formula': '(1.5 * (samples.B08 - samples.B04)) / (samples.B08 + samples.B04 + 0.5)'},
+    'EVI': {'bands': ('B02', 'B04', 'B08'),
+            'formula': '2.5 * (samples.B08 - samples.B04) / '
+                       '(samples.B08 + 6.0 * samples.B04 - 7.5 * samples.B02 + 1.0)'},
+}
+
+
+def _index_definition(index):
+    """
+    Look up the Sentinel-2 band list + evalscript formula for a supported index.
+    Pure function, no network -- unit-testable directly against the constant above.
+
+    :raises NotImplementedError: for an index not in SENTINEL_INDEX_DEFS
+    """
+    try:
+        return SENTINEL_INDEX_DEFS[index]
+    except KeyError:
+        raise NotImplementedError(
+            "Unsupported index '%s' -- supported: %s" % (index, ', '.join(sorted(SENTINEL_INDEX_DEFS))))
+
 
 # CDSE's fixed public endpoints. Not secrets -- unlike the client id/secret these
 # never change per-deployment, so they're constants here rather than settings.
@@ -318,25 +364,27 @@ def fetch_field_statistics(geom, date_from, date_to, index='NDVI'):
     """
     from sentinelhub import CRS, Geometry, SentinelHubStatistical
 
-    if index != 'NDVI':
-        raise NotImplementedError("Only NDVI is wired up so far")
+    index_def = _index_definition(index)
 
     config = _config()
     sh_geometry = Geometry(geom.wkt, crs=CRS.WGS84)
 
-    # No units="REFLECTANCE" here -- NDVI is a scale-invariant ratio, so this
-    # evalscript never hit the SCL/REFLECTANCE units conflict fetch_field_imagery
-    # does (see module docstring). That means SCL-based cloud exclusion folds
-    # straight into the existing dataMask logic, live-verified, no separate
-    # request needed. dataMask=0 pixels are excluded from Sentinel Hub's own
-    # sampleCount/noDataCount aggregation, which is what valid_pixel_pct reads.
+    # No units="REFLECTANCE" here -- every supported index is a scale-invariant
+    # ratio, so this evalscript never hits the SCL/REFLECTANCE units conflict
+    # fetch_field_imagery does (see module docstring). That means SCL-based cloud
+    # exclusion folds straight into the existing dataMask logic, live-verified,
+    # no separate request needed. dataMask=0 pixels are excluded from Sentinel
+    # Hub's own sampleCount/noDataCount aggregation, which is what
+    # valid_pixel_pct reads.
     excluded = ", ".join(str(c) for c in sorted(SCL_EXCLUDED_CLASSES))
+    input_bands = list(index_def['bands']) + ['SCL', 'dataMask']
+    bands_js = "[%s]" % ", ".join('"%s"' % b for b in input_bands)
     evalscript = """
         //VERSION=3
         function setup() {
             return {
-                input: [{bands: ["B04", "B08", "SCL", "dataMask"]}],
-                output: [{id: "ndvi", bands: 1}, {id: "dataMask", bands: 1}]
+                input: [{bands: %s}],
+                output: [{id: "value", bands: 1}, {id: "dataMask", bands: 1}]
             };
         }
         function evaluatePixel(samples) {
@@ -345,9 +393,9 @@ def fetch_field_statistics(geom, date_from, date_to, index='NDVI'):
             for (var i = 0; i < cloudClasses.length; i++) {
                 if (samples.SCL == cloudClasses[i]) { valid = 0; }
             }
-            return {ndvi: [index(samples.B08, samples.B04)], dataMask: [valid]};
+            return {value: [%s], dataMask: [valid]};
         }
-    """ % excluded
+    """ % (bands_js, excluded, index_def['formula'])
 
     request = SentinelHubStatistical(
         aggregation=SentinelHubStatistical.aggregation(

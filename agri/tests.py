@@ -1574,6 +1574,23 @@ class TestSatellitePull(BootTestCase):
         # Empty array -> 0.0, not a crash
         self.assertEqual(_valid_pixel_pct(np.array([], dtype='uint8')), 0.0)
 
+    def test_index_definition_pure_function(self):
+        # No network -- pure lookup, matching the real supported set live-tested
+        # against Sentinel Hub (stage-10-sentinel-roadmap.md Phase 4).
+        from agri.remote_sense.sentinel_client import _index_definition, SENTINEL_INDEX_DEFS
+
+        for name in ('NDVI', 'GNDVI', 'NDRE', 'SAVI', 'EVI'):
+            definition = _index_definition(name)
+            self.assertIn('bands', definition)
+            self.assertIn('formula', definition)
+            self.assertTrue(len(definition['bands']) >= 2)
+            self.assertIn('B08', definition['bands'])  # every supported index uses NIR
+
+        self.assertEqual(set(SENTINEL_INDEX_DEFS.keys()), {'NDVI', 'GNDVI', 'NDRE', 'SAVI', 'EVI'})
+
+        with self.assertRaises(NotImplementedError):
+            _index_definition('BOGUS')
+
     def test_pull_satellite_capture_stores_valid_pixel_pct(self):
         import datetime
         from agri.models import AgriFarm, CaptureMeta
@@ -1714,6 +1731,36 @@ class TestSatellitePull(BootTestCase):
         with mock.patch("agri.remote_sense.sentinel_client.fetch_field_statistics", return_value=[]):
             with self.assertRaises(SatellitePullError):
                 pull_satellite_comparison(boundary.id)
+
+    def test_pull_satellite_comparison_accepts_index_choice(self):
+        # Stage 10 Phase 4: the caller can ask for a non-NDVI index; it must
+        # reach fetch_field_statistics and land on both index_used and stats.
+        import datetime
+        from agri.models import AnalysisResult, CaptureMeta
+        from agri.remote_sense.sentinel_pull import pull_satellite_comparison
+
+        CaptureMeta.objects.create(task=self.task, capture_date=datetime.date(2026, 7, 5))
+        boundary = Boundary.objects.create(task=self.task, geom=_poly(), status=Boundary.APPROVED,
+                                           created_by=self.user)
+
+        with mock.patch("agri.remote_sense.sentinel_client.fetch_field_statistics",
+                        return_value=[{'date': '2026-07-05', 'mean': 0.17, 'stddev': 0.02,
+                                      'valid_pixel_pct': 95.0}]) as m:
+            run = pull_satellite_comparison(boundary.id, index='EVI')
+
+        self.assertEqual(run.index_used, 'EVI')
+        result = run.results.get(kind=AnalysisResult.PLANT_HEALTH)
+        self.assertEqual(result.stats['index'], 'EVI')
+        self.assertEqual(m.call_args.kwargs.get('index'), 'EVI')
+
+    def test_pull_satellite_comparison_unsupported_index_raises(self):
+        from agri.remote_sense.sentinel_pull import pull_satellite_comparison, SatellitePullError
+        boundary = Boundary.objects.create(task=self.task, geom=_poly(), status=Boundary.APPROVED,
+                                           created_by=self.user)
+        with mock.patch("agri.remote_sense.sentinel_client.fetch_field_statistics",
+                        side_effect=NotImplementedError("Unsupported index 'BOGUS'")):
+            with self.assertRaises(SatellitePullError):
+                pull_satellite_comparison(boundary.id, index='BOGUS')
 
     # ---- API endpoints ----
 

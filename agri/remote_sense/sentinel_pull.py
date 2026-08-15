@@ -8,7 +8,8 @@ Two independent pulls:
   - pull_satellite_capture(): imagery -> a new satellite-sourced Capture, via the
     same import path every other capture uses (agri/capture.py). Boundaries are
     auto-seeded/cloned exactly as for any other capture.
-  - pull_satellite_comparison(): Sentinel's OWN computed index for an ALREADY
+  - pull_satellite_comparison(): Sentinel's OWN computed index (NDVI by default;
+    any of sentinel_client.SENTINEL_INDEX_DEFS, Stage 10 Phase 4) for an ALREADY
     APPROVED boundary's exact field + date -- stored as a second AnalysisRun
     (computed_by=SENTINEL) on that same boundary, next to our own analysis, for
     side-by-side comparison. Requires an approved boundary (not a bare farm) so
@@ -129,14 +130,18 @@ def pull_satellite_capture(project_id, date_from, date_to, name=None, field_id=N
     return task
 
 
-def pull_satellite_comparison(boundary_id):
+def pull_satellite_comparison(boundary_id, index='NDVI'):
     """
-    Fetch Sentinel's own computed NDVI for an APPROVED boundary's exact geometry
-    and capture date, and record it as a second AnalysisRun (computed_by=SENTINEL)
-    on that same boundary -- next to whatever this system's own analysis found,
-    for side-by-side comparison (stage-9-satellite-monitoring.md §9).
+    Fetch Sentinel's own computed vegetation index (default NDVI; see
+    sentinel_client.SENTINEL_INDEX_DEFS for the full supported set -- Stage 10
+    Phase 4) for an APPROVED boundary's exact geometry and capture date, and
+    record it as a second AnalysisRun (computed_by=SENTINEL) on that same
+    boundary -- next to whatever this system's own analysis found, for
+    side-by-side comparison (stage-9-satellite-monitoring.md §9).
 
+    :param index: one of sentinel_client.SENTINEL_INDEX_DEFS's keys
     :return: the created AnalysisRun
+    :raises SatellitePullError: including for an unsupported index name
     """
     try:
         boundary = Boundary.objects.select_related('task', 'task__capture_meta').get(pk=boundary_id)
@@ -152,11 +157,13 @@ def pull_satellite_comparison(boundary_id):
 
     try:
         points = sentinel_client.fetch_field_statistics(
-            boundary.geom, capture_date, capture_date + datetime.timedelta(days=1))
+            boundary.geom, capture_date, capture_date + datetime.timedelta(days=1), index=index)
     except sentinel_client.SentinelNotConfiguredError as e:
         raise SatellitePullError(str(e))
     except sentinel_client.SentinelRequestError as e:
         raise SatellitePullError("Could not fetch satellite reference data: %s" % str(e))
+    except NotImplementedError as e:
+        raise SatellitePullError(str(e))
 
     if not points:
         raise SatellitePullError(
@@ -166,10 +173,10 @@ def pull_satellite_comparison(boundary_id):
 
     run = AnalysisRun.objects.create(
         task=boundary.task, boundary=boundary, computed_by=AnalysisRun.SENTINEL,
-        status=AnalysisRun.PENDING_REVIEW, index_used='NDVI', completed_at=timezone.now())
+        status=AnalysisRun.PENDING_REVIEW, index_used=index, completed_at=timezone.now())
     AnalysisResult.objects.create(
         run=run, kind=AnalysisResult.PLANT_HEALTH,
-        stats={'index': 'NDVI', 'mean': point['mean'], 'stddev': point.get('stddev'),
+        stats={'index': index, 'mean': point['mean'], 'stddev': point.get('stddev'),
               'reference_date': point['date'], 'valid_pixel_pct': point.get('valid_pixel_pct')})
 
     return run

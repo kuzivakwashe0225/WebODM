@@ -242,6 +242,40 @@ already documented above (confirmed identical error signatures across all four r
 1, Phase 2, Phase 3, and the original stage-9 baseline — never new regressions). No live API surface here
 (pure in-process refactor), so no standalone verification script was needed this time.
 
+### Stage 10 Phase 4 — Broader Sentinel indices (`TestSatellitePull`, extended)
+
+`fetch_field_statistics()` no longer hardcodes NDVI; a `SENTINEL_INDEX_DEFS` table adds GNDVI, NDRE,
+SAVI, and EVI, and `pull_satellite_comparison()` accepts an `index` choice, per
+[stage-10-sentinel-roadmap.md](stages/stage-10-sentinel-roadmap.md) Phase 4. `TestSatellitePull` grew
+from 30 to 33 tests; new coverage:
+
+| Test | Verifies |
+|---|---|
+| `test_index_definition_pure_function` | All 5 supported indices resolve to a bands+formula definition (every one uses the NIR band), the table's key set is exactly the 5 supported names, and an unsupported name raises `NotImplementedError` — no mocking, no network |
+| `test_pull_satellite_comparison_accepts_index_choice` | Passing `index='EVI'` reaches `fetch_field_statistics(..., index='EVI')`, and lands on both `AnalysisRun.index_used` and `AnalysisResult.stats['index']` |
+| `test_pull_satellite_comparison_unsupported_index_raises` | A `NotImplementedError` from the client is translated to `SatellitePullError`, not left to propagate raw |
+
+The 4 pre-existing comparison tests (`test_pull_satellite_comparison_creates_sentinel_run` and friends)
+were re-run unmodified to confirm the implicit NDVI-default path is unchanged.
+
+**Live-verified, not assumed:** all 5 indices were run against the real CDSE account for the same AOI/
+date-range Phase 1 used, before trusting the hand-written EVI/SAVI formulas (multi-band arithmetic is new
+evalscript surface, not something Phase 1's live-testing already proved). All 5 returned 6 points each
+with plausible means and no evalscript errors; NDVI's mean matched Phase 1's original live-test result
+almost exactly, confirming the evalscript restructuring introduced no regression. No new bugs found this
+time — unlike Phase 1, the first live run worked cleanly. Full account in
+[stage-10-sentinel-roadmap.md](stages/stage-10-sentinel-roadmap.md) Phase 4.
+
+**Result (2026-08-15): `TestSatellitePull` 33/33 green.** Full `agri.tests` suite re-run afterward:
+**104/106 green** — the two failures are the *same* pre-existing, unrelated issues already documented
+above (confirmed identical error signatures across all five runs this session — Phases 1–4 and the
+original stage-9 baseline — never new regressions).
+
+Not wired into the API/Celery/frontend yet — `SatelliteComparisonPullView` still calls
+`pull_satellite_comparison.delay(boundary.id)` with the implicit NDVI default. An index picker in the
+"Compare with Satellite" UI is separate, deferred frontend work (this phase was explicitly build-ahead-of-
+demand, not a requested feature).
+
 ## Manual testing
 Step-by-step (rebrand visual checks + Boundary API via curl / browsable API / admin) is in
 [manual-testing.md](manual-testing.md).

@@ -477,7 +477,7 @@ masking, historical baselines, retention policy, and the pre-existing AgriField 
 
 ---
 
-## Stage 10 — Sentinel roadmap + Phases 1–3 (2026-08-14 to 2026-08-15) 🚧 Phases 1–3 done
+## Stage 10 — Sentinel roadmap + Phases 1–4 (2026-08-14 to 2026-08-15) 🚧 Phases 1–4 done
 
 **Roadmap.** User pasted an externally-drafted architecture review (not written against this codebase)
 proposing a "multi-source observation platform" direction. Reviewed it skeptically against the actual
@@ -562,6 +562,33 @@ in `--dev` mode: 101/103 — same two pre-existing, unrelated failures as every 
 (confirmed identical error signatures a fourth time — zero new regressions across four consecutive
 full-suite runs now).
 
-**Not done:** Phases 4–6 of the roadmap (broader Sentinel indices, observation timeline, historical
-baselines).
+**Not done (at Phase 3 checkpoint):** Phases 4–6 of the roadmap (broader Sentinel indices, observation
+timeline, historical baselines).
+
+**Phase 4 implementation.** Multi-band arithmetic (EVI, SAVI) is new evalscript surface Phase 1 never
+proved, so — same discipline as every phase this session — live-verified all 5 supported indices against
+the real CDSE account *before* trusting the hand-written formulas, rather than assuming they'd work
+because the request shape (SCL + dataMask cloud exclusion) was already proven. All 5 came back clean on
+the first try: 6 points each, plausible means, NDVI's result matching Phase 1's original almost exactly
+(confirming the evalscript restructuring didn't regress anything). Unlike every prior phase, no bug
+turned up this round.
+
+Built: `SENTINEL_INDEX_DEFS` in `sentinel_client.py` (NDVI/GNDVI/NDRE/SAVI/EVI, formulas matched
+band-for-band to this codebase's own drone-side algos in `app/api/formulas.py` so a Sentinel value is
+actually comparable to our own analysis for the same index) and `_index_definition()`, a pure lookup
+`fetch_field_statistics()` now consults instead of hardcoding NDVI; `pull_satellite_comparison(boundary_id,
+index='NDVI')` in `sentinel_pull.py` now takes an index choice, threading it through to
+`AnalysisRun.index_used` and `AnalysisResult.stats['index']`, and translating an unsupported-index
+`NotImplementedError` into `SatellitePullError`. Deliberately **not** wired into the API/Celery/frontend —
+the comparison endpoint still defaults to NDVI — since the roadmap scoped this phase to the two Python
+functions' caller surface only, and an index-picker UI is separate work with no concrete demand yet.
+
+**Verified for real:** `TestSatellitePull` grew from 30 to 33 tests (a pure-function test for the new
+lookup table, plus index-choice and error-translation tests for the comparison path, network mocked). The
+4 pre-existing comparison tests were re-run unmodified to confirm the NDVI-default path didn't change.
+`./webodm.sh test backend agri.tests` in `--dev` mode: `TestSatellitePull` 33/33, full suite 104/106 —
+same two pre-existing, unrelated failures as every run this session (fifth consecutive confirmation, zero
+new regressions).
+
+**Not done:** Phases 5–6 of the roadmap (observation timeline, historical baselines).
 

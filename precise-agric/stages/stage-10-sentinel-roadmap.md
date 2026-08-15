@@ -1,13 +1,13 @@
 # Stage 10 — Sentinel Integration Roadmap (post Stage 9 audit)
 
-> **Status (2026-08-15): Phases 1–3 built and test-verified.** `TestSatellitePull` grew from 13 → 24 → 30
-> tests across both phases; Phase 3 added 1 test to `TestAgri` instead (pure refactor, no client surface).
-> Full `agri.tests` re-run after each phase: 94/96, then 100/102, then 101/103 — the two failures
-> throughout are the same pre-existing, unrelated-to-this-work issues already documented in stage-9 §13
-> (confirmed identical error signatures every time, never new regressions). Three real bugs were found
-> live-testing Phase 1's cloud-masking approach against the real Sentinel Hub API *before* they became
-> silent data-quality bugs — see §3 Phase 1. Phases 4–6 are still plan-only; each gets its own
-> implementation pass.
+> **Status (2026-08-15): Phases 1–4 built and test-verified.** `TestSatellitePull` grew from 13 → 24 → 30
+> → 33 tests across Phases 1, 2, 4; Phase 3 added 1 test to `TestAgri` instead (pure refactor, no client
+> surface). Full `agri.tests` re-run after each phase: 94/96, then 100/102, then 101/103, then 104/106 —
+> the two failures throughout are the same pre-existing, unrelated-to-this-work issues already documented
+> in stage-9 §13 (confirmed identical error signatures every time, never new regressions). Three real bugs
+> were found live-testing Phase 1's cloud-masking approach against the real Sentinel Hub API *before* they
+> became silent data-quality bugs — see §3 Phase 1. Phase 4's broader indices worked cleanly on the first
+> live run, no new bugs. Phases 5–6 are still plan-only; each gets its own implementation pass.
 
 ## 1. Why this document exists
 
@@ -247,17 +247,49 @@ rest `True`).
 live-verification script needed this time — same judgment call as Stage 9's non-network code. Real
 `./webodm.sh test backend agri.tests` run in `--dev` mode confirmed no regressions.
 
-### Phase 4 — Broaden Sentinel's own indices beyond NDVI
+### Phase 4 — Broaden Sentinel's own indices beyond NDVI — ✅ BUILT (2026-08-15)
 
-**Why:** `fetch_field_statistics(index='NDVI')` hard-fails on anything else today; EVI (or others) is a
-small evalscript-parametrization change, useful once the comparison feature sees real usage.
+**Why:** `fetch_field_statistics(index='NDVI')` hard-failed on anything else; EVI (or others) is a small
+evalscript-parametrization change, useful once the comparison feature sees real usage.
 
-**What:** parametrize the evalscript by index name instead of hardcoding NDVI's formula; extend
-`pull_satellite_comparison()`'s caller surface to accept an index choice.
+**What was built:**
+- `agri/remote_sense/sentinel_client.py`: `SENTINEL_INDEX_DEFS` — a constant dict of 5 supported indices
+  (`NDVI`, `GNDVI`, `NDRE`, `SAVI`, `EVI`), each with its Sentinel-2 band list and evalscript formula.
+  NDVI/GNDVI/NDRE reuse Sentinel Hub's built-in `index()` normalized-difference helper; EVI/SAVI are
+  written out directly. Formulas were chosen to **match this codebase's own drone-side algos**
+  (`app/api/formulas.py`'s N/R/G/B/Re shorthand, mapped to Sentinel-2 B08/B04/B03/B02/B05) band-for-band,
+  so a Sentinel value for a given index is actually comparable to our own analysis for that same index —
+  not just a different, unrelated ratio. `_index_definition(index)` is a pure lookup function (raises
+  `NotImplementedError` for anything outside the 5, same behavior as before, just table-driven now).
+  `fetch_field_statistics()`'s evalscript now builds its `input.bands` list and formula from this table
+  instead of hardcoding NDVI's `["B04", "B08", "SCL", "dataMask"]` / `index(samples.B08, samples.B04)`.
+- `agri/remote_sense/sentinel_pull.py`: `pull_satellite_comparison(boundary_id, index='NDVI')` — the
+  `index` param flows through to `fetch_field_statistics()`, `AnalysisRun.index_used`, and
+  `AnalysisResult.stats['index']`. A `NotImplementedError` from an unsupported index is translated to
+  `SatellitePullError`, matching how the other Sentinel-client exceptions are handled here.
+- **Not wired to the API/Celery/frontend yet** — the locked Phase 4 scope (see plan file) only extends the
+  two Python functions' caller surface; `SatelliteComparisonPullView` still calls
+  `pull_satellite_comparison.delay(boundary.id)` with the implicit NDVI default, same as before. Wiring an
+  index picker into the "Compare with Satellite" UI is real, scoped frontend work of its own and stays
+  deferred until there's a concrete reason to pick anything other than NDVI (this phase was explicitly
+  low-priority/build-ahead-of-demand in the original plan).
 
-**Files:** `agri/remote_sense/sentinel_client.py`, `agri/remote_sense/sentinel_pull.py`.
+**Live-verified, not assumed:** all 5 indices were run against the real CDSE account for the same AOI/
+date-range Phase 1 used — 6 points each, no evalscript errors. NDVI's mean matched Phase 1's original
+live-test result almost exactly (~0.297 here vs. the 0.29–0.36 range recorded then), confirming the
+evalscript restructuring introduced no regression; GNDVI ~0.44, NDRE ~0.18, SAVI ~0.18, EVI ~0.17 — all
+plausible for the same vegetated AOI. No new bugs found this time; the parametrization worked cleanly on
+the first live run (unlike Phase 1, where the equivalent first attempt hit a real 400).
 
-**Priority:** low — defer until Phases 1–2 are live and real usage shows this is actually wanted.
+**Files touched:** `agri/remote_sense/sentinel_client.py`, `agri/remote_sense/sentinel_pull.py`,
+`agri/tests.py` (3 new tests in `TestSatellitePull`, now 33).
+
+**Verification:** `_index_definition()` unit-tested directly (pure function — all 5 supported indices,
+plus the unsupported-index error case — no mocking, no network). `pull_satellite_comparison()`'s new
+`index` parameter and its `NotImplementedError`→`SatellitePullError` translation tested with the network
+mocked, alongside re-running the 4 pre-existing comparison tests to confirm the NDVI-default path is
+unchanged. Real `./webodm.sh test backend agri.tests` run in `--dev` mode: targeted comparison-path tests
+7/7, full suite regression-checked (see status header for the run-by-run count).
 
 ### Phase 5 — Observation timeline (field-level, multi-source)
 
